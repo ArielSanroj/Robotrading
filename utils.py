@@ -14,11 +14,11 @@ def predict_stock_trend(history):
     :return: dict containing predictions and confidences for each model
     """
     rf_prediction, rf_confidence, rf_explanation = random_forest_prediction(history)
-    arima_pred, arima_conf, daily_forecasts = get_arima_prediction(history)
+    arima_predictions = get_arima_prediction(history)
     
     return {
         'Random Forest': (rf_prediction, rf_confidence, rf_explanation),
-        'ARIMA': (arima_pred, arima_conf, daily_forecasts)
+        'ARIMA': arima_predictions
     }
 
 def random_forest_prediction(history):
@@ -94,27 +94,40 @@ def generate_rf_explanation(feature_importance, current_values, df):
 
 def get_arima_prediction(history):
     """
-    Predict the stock trend using ARIMA model.
+    Predict the stock trend using ARIMA model for multiple time periods.
     
     :param history: pandas DataFrame containing historical stock data
-    :return: tuple (prediction, confidence, daily_forecasts)
+    :return: dict containing predictions for different time periods
     """
     df = history['Close'].resample('D').last().ffill()
     model = ARIMA(df, order=(1, 1, 1))
     results = model.fit()
     
-    # Generate 7-day forecast
-    forecast = results.forecast(steps=7)
-    dates = [df.index[-1] + datetime.timedelta(days=i+1) for i in range(7)]
-    daily_forecasts = pd.Series(forecast, index=dates)
+    # Define forecast periods
+    periods = [7, 15, 30, 90, 120]
+    forecasts = {}
     
-    # Determine overall trend
-    prediction = "increase" if daily_forecasts.mean() > df.iloc[-1] else "decrease"
+    for period in periods:
+        # Generate forecast for the period
+        forecast = results.forecast(steps=period)
+        dates = [df.index[-1] + datetime.timedelta(days=i+1) for i in range(period)]
+        daily_forecasts = pd.Series(forecast, index=dates)
+        
+        # Calculate trend and confidence
+        trend = "increase" if daily_forecasts.mean() > df.iloc[-1] else "decrease"
+        
+        # Calculate confidence based on forecast standard errors
+        forecast_std = np.std(daily_forecasts)
+        confidence = 100 / (1 + forecast_std/df.iloc[-1])  # Normalize confidence
+        
+        forecasts[period] = {
+            'prediction': trend,
+            'confidence': confidence,
+            'daily_forecasts': daily_forecasts,
+            'last_price': df.iloc[-1]
+        }
     
-    # Use AIC as a proxy for confidence (lower AIC is better)
-    confidence = 100 / (1 + results.aic)
-    
-    return (prediction, confidence, daily_forecasts)
+    return forecasts
 
 def calculate_rsi(prices, period=14):
     """

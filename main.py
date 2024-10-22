@@ -104,38 +104,67 @@ if company_name:
                 )
                 
                 # Stock prediction
-                st.subheader("Stock Price Prediction (7-day forecast)")
+                st.header("Stock Price Predictions")
                 predictions = predict_stock_trend(history)
                 
                 # Display Random Forest predictions
                 rf_pred, rf_conf, rf_explanation = predictions['Random Forest']
-                st.write("### Random Forest Model Prediction")
+                st.subheader("Random Forest Model Prediction")
                 st.write(f"**Prediction:** The stock is expected to {rf_pred} over the next 7 days")
                 st.write(f"**Confidence:** {rf_conf:.2f}%")
                 st.write("**Analysis:**")
                 st.write(rf_explanation)
                 st.write("---")
                 
-                # Display ARIMA predictions
-                arima_pred, arima_conf, daily_forecasts = predictions['ARIMA']
-                st.write("### ARIMA Model Prediction")
-                st.write(f"**Prediction:** The stock is expected to {arima_pred} over the next 7 days")
-                st.write(f"**Confidence:** {arima_conf:.2f}%")
-                st.write("**Daily Price Forecasts:**")
+                # Display ARIMA predictions with tabs
+                st.subheader("ARIMA Model Predictions")
+                arima_predictions = predictions['ARIMA']
                 
-                # Create a DataFrame for forecasted values
-                forecast_df = pd.DataFrame({
-                    'Date': daily_forecasts.index,
-                    'Predicted Price': daily_forecasts.values
-                })
-                st.dataframe(forecast_df.style.format({'Predicted Price': '${:.2f}'}))
+                # Create tabs for different forecast periods
+                tab7, tab15, tab30, tab90, tab120 = st.tabs([
+                    "7 Days", "15 Days", "30 Days", "90 Days", "120 Days"
+                ])
                 
-                # Plot ARIMA forecasts
-                fig_forecast = go.Figure()
-                fig_forecast.add_trace(go.Scatter(x=history.index[-30:], y=history['Close'][-30:], name="Historical Price"))
-                fig_forecast.add_trace(go.Scatter(x=daily_forecasts.index, y=daily_forecasts, name="Forecast", line=dict(dash='dash')))
-                fig_forecast.update_layout(title="7-Day Price Forecast", xaxis_title="Date", yaxis_title="Price (USD)")
-                st.plotly_chart(fig_forecast, use_container_width=True)
+                # Function to display forecast data in a tab
+                def display_forecast(tab, period, forecast_data):
+                    with tab:
+                        st.write(f"**{period}-Day Forecast**")
+                        st.write(f"**Prediction:** The stock is expected to {forecast_data['prediction']} over the next {period} days")
+                        st.write(f"**Confidence:** {forecast_data['confidence']:.2f}%")
+                        
+                        # Create forecast DataFrame
+                        forecast_df = pd.DataFrame({
+                            'Date': forecast_data['daily_forecasts'].index,
+                            'Predicted Price': forecast_data['daily_forecasts'].values
+                        })
+                        st.dataframe(forecast_df.style.format({'Predicted Price': '${:.2f}'}))
+                        
+                        # Plot forecast
+                        fig_forecast = go.Figure()
+                        fig_forecast.add_trace(go.Scatter(
+                            x=history.index[-30:],
+                            y=history['Close'][-30:],
+                            name="Historical Price"
+                        ))
+                        fig_forecast.add_trace(go.Scatter(
+                            x=forecast_data['daily_forecasts'].index,
+                            y=forecast_data['daily_forecasts'],
+                            name="Forecast",
+                            line=dict(dash='dash')
+                        ))
+                        fig_forecast.update_layout(
+                            title=f"{period}-Day Price Forecast",
+                            xaxis_title="Date",
+                            yaxis_title="Price (USD)"
+                        )
+                        st.plotly_chart(fig_forecast, use_container_width=True)
+                
+                # Display forecasts in tabs
+                display_forecast(tab7, 7, arima_predictions[7])
+                display_forecast(tab15, 15, arima_predictions[15])
+                display_forecast(tab30, 30, arima_predictions[30])
+                display_forecast(tab90, 90, arima_predictions[90])
+                display_forecast(tab120, 120, arima_predictions[120])
                 
                 st.write("---")
                 st.write("Note: These predictions are based on historical data and should not be used as financial advice.")
