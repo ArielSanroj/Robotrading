@@ -67,9 +67,15 @@ if stock_symbol:
         
         # Stock prediction
         st.subheader("Stock Price Prediction")
-        prediction, confidence = predict_stock_trend(history)
-        st.write(f"Based on historical data, the stock price is predicted to {prediction} in the near future.")
-        st.write(f"Confidence: {confidence:.2f}%")
+        predictions = predict_stock_trend(history)
+        
+        for model, (prediction, confidence) in predictions.items():
+            st.write(f"{model} Model:")
+            st.write(f"Prediction: The stock price is expected to {prediction} in the near future.")
+            st.write(f"Confidence: {confidence:.2f}%")
+            st.write("---")
+        
+        st.write("Note: These predictions are based on historical data and should not be used as financial advice.")
         
     except Exception as e:
         st.error(f"Error fetching data for {stock_symbol}. Please check the symbol and try again.")
