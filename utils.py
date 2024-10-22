@@ -13,11 +13,11 @@ def predict_stock_trend(history):
     :return: dict containing predictions and confidences for each model
     """
     rf_prediction, rf_confidence = random_forest_prediction(history)
-    arima_prediction, arima_confidence = arima_prediction(history)
+    arima_pred, arima_conf = get_arima_prediction(history)
     
     return {
         'Random Forest': (rf_prediction, rf_confidence),
-        'ARIMA': (arima_prediction, arima_confidence)
+        'ARIMA': (arima_pred, arima_conf)
     }
 
 def random_forest_prediction(history):
@@ -54,7 +54,7 @@ def random_forest_prediction(history):
 
     return ("increase" if prediction == 1 else "decrease", confidence)
 
-def arima_prediction(history):
+def get_arima_prediction(history):
     """
     Predict the stock trend using ARIMA model.
     
