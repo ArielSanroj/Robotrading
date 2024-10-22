@@ -1037,6 +1037,7 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "statsmodels" },
     { name = "streamlit" },
+    { name = "ta" },
     { name = "tensorflow" },
     { name = "yfinance" },
 ]
@@ -1051,6 +1052,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.5.2" },
     { name = "statsmodels", specifier = ">=0.14.4" },
     { name = "streamlit", specifier = ">=1.39.0" },
+    { name = "ta", specifier = ">=0.11.0" },
     { name = "tensorflow", specifier = ">=2.14.0" },
     { name = "yfinance", specifier = "==0.2.46" },
 ]
@@ -1317,6 +1319,16 @@ sdist = { url = "https://files.pythonhosted.org/packages/d5/21/3740871ad79ee35f4
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ef/e1/f9c479f9dbe0bb702ea5ca6608f10e91a708b438f7fb4572a2642718c6e3/streamlit-1.39.0-py2.py3-none-any.whl", hash = "sha256:a359fc54ed568b35b055ff1d453c320735539ad12e264365a36458aef55a5fba", size = 8741335 },
 ]
+
+[[package]]
+name = "ta"
+version = "0.11.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pandas" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e0/9a/37d92a6b470dc9088612c2399a68f1a9ac22872d4e1eff416818e22ab11b/ta-0.11.0.tar.gz", hash = "sha256:de86af43418420bd6b088a2ea9b95483071bf453c522a8441bc2f12bcf8493fd", size = 25308 }
 
 [[package]]
 name = "tenacity"

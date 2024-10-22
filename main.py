@@ -42,7 +42,7 @@ company_name = st.text_input("Enter company name (e.g., Apple)", "Apple")
 if company_name:
     # Find matching companies using fuzzy matching
     matches = process.extract(company_name, list(COMPANY_SYMBOLS.keys()), limit=5)
-    matching_companies = [match[0] for match in matches if match[1] >= 60]  # Only show matches with score >= 60
+    matching_companies = [match[0] for match in matches if match[1] >= 60]
     
     if not matching_companies:
         st.warning("No matching companies found. Please try a different company name.")
@@ -112,7 +112,7 @@ if company_name:
                 st.subheader("Random Forest Model Prediction")
                 st.write(f"**Prediction:** The stock is expected to {rf_pred} over the next 7 days")
                 st.write(f"**Confidence:** {rf_conf:.2f}%")
-                st.write("**Analysis:**")
+                st.write("**Technical Analysis:**")
                 st.write(rf_explanation)
                 st.write("---")
                 
@@ -120,51 +120,79 @@ if company_name:
                 st.subheader("ARIMA Model Predictions")
                 arima_predictions = predictions['ARIMA']
                 
-                # Create tabs for different forecast periods
-                tab7, tab15, tab30, tab90, tab120 = st.tabs([
-                    "7 Days", "15 Days", "30 Days", "90 Days", "120 Days"
-                ])
-                
-                # Function to display forecast data in a tab
-                def display_forecast(tab, period, forecast_data):
-                    with tab:
-                        st.write(f"**{period}-Day Forecast**")
-                        st.write(f"**Prediction:** The stock is expected to {forecast_data['prediction']} over the next {period} days")
-                        st.write(f"**Confidence:** {forecast_data['confidence']:.2f}%")
-                        
-                        # Create forecast DataFrame
-                        forecast_df = pd.DataFrame({
-                            'Date': forecast_data['daily_forecasts'].index,
-                            'Predicted Price': forecast_data['daily_forecasts'].values
-                        })
-                        st.dataframe(forecast_df.style.format({'Predicted Price': '${:.2f}'}))
-                        
-                        # Plot forecast
-                        fig_forecast = go.Figure()
-                        fig_forecast.add_trace(go.Scatter(
-                            x=history.index[-30:],
-                            y=history['Close'][-30:],
-                            name="Historical Price"
-                        ))
-                        fig_forecast.add_trace(go.Scatter(
-                            x=forecast_data['daily_forecasts'].index,
-                            y=forecast_data['daily_forecasts'],
-                            name="Forecast",
-                            line=dict(dash='dash')
-                        ))
-                        fig_forecast.update_layout(
-                            title=f"{period}-Day Price Forecast",
-                            xaxis_title="Date",
-                            yaxis_title="Price (USD)"
-                        )
-                        st.plotly_chart(fig_forecast, use_container_width=True)
-                
-                # Display forecasts in tabs
-                display_forecast(tab7, 7, arima_predictions[7])
-                display_forecast(tab15, 15, arima_predictions[15])
-                display_forecast(tab30, 30, arima_predictions[30])
-                display_forecast(tab90, 90, arima_predictions[90])
-                display_forecast(tab120, 120, arima_predictions[120])
+                if arima_predictions is not None:
+                    # Create tabs for different forecast periods
+                    tab7, tab15, tab30, tab90, tab120 = st.tabs([
+                        "7 Days", "15 Days", "30 Days", "90 Days", "120 Days"
+                    ])
+                    
+                    def display_forecast(tab, period, forecast_data):
+                        with tab:
+                            st.write(f"**{period}-Day Forecast**")
+                            st.write(f"**Prediction:** The stock is expected to {forecast_data['prediction']} over the next {period} days")
+                            st.write(f"**Confidence:** {forecast_data['confidence']:.2f}%")
+                            
+                            # Create forecast DataFrame
+                            forecast_df = pd.DataFrame({
+                                'Date': forecast_data['daily_forecasts'].index,
+                                'Predicted Price': forecast_data['daily_forecasts'].values,
+                                'Lower Bound': forecast_data['lower_bound'].values,
+                                'Upper Bound': forecast_data['upper_bound'].values
+                            })
+                            st.dataframe(forecast_df.style.format({
+                                'Predicted Price': '${:.2f}',
+                                'Lower Bound': '${:.2f}',
+                                'Upper Bound': '${:.2f}'
+                            }))
+                            
+                            # Plot forecast with confidence intervals
+                            fig_forecast = go.Figure()
+                            # Historical data
+                            fig_forecast.add_trace(go.Scatter(
+                                x=history.index[-30:],
+                                y=history['Close'][-30:],
+                                name="Historical Price"
+                            ))
+                            # Forecast
+                            fig_forecast.add_trace(go.Scatter(
+                                x=forecast_data['daily_forecasts'].index,
+                                y=forecast_data['daily_forecasts'],
+                                name="Forecast",
+                                line=dict(dash='dash')
+                            ))
+                            # Confidence intervals
+                            fig_forecast.add_trace(go.Scatter(
+                                x=forecast_data['upper_bound'].index,
+                                y=forecast_data['upper_bound'],
+                                fill=None,
+                                mode='lines',
+                                line_color='rgba(0,100,80,0.2)',
+                                name='Upper Bound'
+                            ))
+                            fig_forecast.add_trace(go.Scatter(
+                                x=forecast_data['lower_bound'].index,
+                                y=forecast_data['lower_bound'],
+                                fill='tonexty',
+                                mode='lines',
+                                line_color='rgba(0,100,80,0.2)',
+                                name='Lower Bound'
+                            ))
+                            fig_forecast.update_layout(
+                                title=f"{period}-Day Price Forecast",
+                                xaxis_title="Date",
+                                yaxis_title="Price (USD)",
+                                showlegend=True
+                            )
+                            st.plotly_chart(fig_forecast, use_container_width=True)
+                    
+                    # Display forecasts in tabs
+                    display_forecast(tab7, 7, arima_predictions[7])
+                    display_forecast(tab15, 15, arima_predictions[15])
+                    display_forecast(tab30, 30, arima_predictions[30])
+                    display_forecast(tab90, 90, arima_predictions[90])
+                    display_forecast(tab120, 120, arima_predictions[120])
+                else:
+                    st.error("ARIMA prediction failed. This might be due to insufficient or invalid data.")
                 
                 st.write("---")
                 st.write("Note: These predictions are based on historical data and should not be used as financial advice.")
