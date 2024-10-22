@@ -1,31 +1,37 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score, StratifiedKFold
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import SelectFromModel
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.arima.model import ARIMA
 import datetime
 import ta
 
-def predict_stock_trend(history):
-    """
-    Predict the stock trend using multiple models.
+def validate_data_quality(df):
+    """Check data quality and completeness."""
+    if df is None or len(df) < 30:  # Minimum required data points
+        raise ValueError("Insufficient data for analysis")
     
-    :param history: pandas DataFrame containing historical stock data
-    :return: dict containing predictions and confidences for each model
-    """
-    rf_prediction, rf_confidence, rf_explanation = random_forest_prediction(history)
-    arima_predictions = get_arima_prediction(history)
+    # Check for missing values
+    missing_pct = df.isnull().sum() / len(df) * 100
+    if missing_pct.max() > 20:  # Maximum allowed missing percentage
+        raise ValueError("Too many missing values in the data")
     
-    return {
-        'Random Forest': (rf_prediction, rf_confidence, rf_explanation),
-        'ARIMA': arima_predictions
-    }
+    # Check for data consistency
+    if (df['High'] < df['Low']).any():
+        raise ValueError("Inconsistent price data: High < Low")
+    
+    if (df['Close'] > df['High']).any() or (df['Close'] < df['Low']).any():
+        raise ValueError("Inconsistent price data: Close price outside High-Low range")
+    
+    return True
 
 def add_technical_indicators(df):
-    """Add technical indicators to the dataframe."""
-    # Trend Indicators
+    """Add enhanced technical indicators to the dataframe."""
+    # Original indicators
     df['SMA5'] = ta.trend.sma_indicator(df['Close'], window=5)
     df['SMA20'] = ta.trend.sma_indicator(df['Close'], window=20)
     df['EMA12'] = ta.trend.ema_indicator(df['Close'], window=12)
@@ -37,120 +43,137 @@ def add_technical_indicators(df):
     df['MACD_Signal'] = macd.macd_signal()
     df['MACD_Hist'] = macd.macd_diff()
     
-    # Bollinger Bands
-    bollinger = ta.volatility.BollingerBands(df['Close'])
-    df['BB_High'] = bollinger.bollinger_hband()
-    df['BB_Low'] = bollinger.bollinger_lband()
-    df['BB_Mid'] = bollinger.bollinger_mavg()
+    # Enhanced Volatility Indicators
+    df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'])
+    df['Volatility_BB'] = ta.volatility.bollinger_pband(df['Close'])
+    df['Volatility_KC'] = ta.volatility.keltner_channel_pband(df['High'], df['Low'], df['Close'])
+    df['Volatility_DC'] = ta.volatility.donchian_channel_pband(df['High'], df['Low'], df['Close'])
     
-    # RSI and Stochastic
+    # Enhanced Momentum Indicators
     df['RSI'] = ta.momentum.rsi(df['Close'])
-    stoch = ta.momentum.StochasticOscillator(df['High'], df['Low'], df['Close'])
-    df['Stoch_K'] = stoch.stoch()
-    df['Stoch_D'] = stoch.stoch_signal()
+    df['TSI'] = ta.momentum.tsi(df['Close'])
+    df['UO'] = ta.momentum.ultimate_oscillator(df['High'], df['Low'], df['Close'])
+    df['Stoch_RSI'] = ta.momentum.stochrsi(df['Close'])
     
-    # Volume indicators
-    df['OBV'] = ta.volume.on_balance_volume(df['Close'], df['Volume'])
-    df['Force_Index'] = ta.volume.force_index(df['Close'], df['Volume'])
+    # Enhanced Trend Strength Indicators
+    df['ADX'] = ta.trend.adx(df['High'], df['Low'], df['Close'])
+    df['CCI'] = ta.trend.cci(df['High'], df['Low'], df['Close'])
+    df['AROON_IND'] = ta.trend.aroon_down(df['Close']) - ta.trend.aroon_up(df['Close'])
+    df['MI'] = ta.trend.mass_index(df['High'], df['Low'])
     
     return df
 
 def random_forest_prediction(history):
-    """
-    Predict the stock trend using an enhanced Random Forest classifier.
-    
-    :param history: pandas DataFrame containing historical stock data
-    :return: tuple (prediction, confidence, explanation)
-    """
-    df = history.copy()
-    df['Tomorrow'] = df['Close'].shift(-1)
-    df['Target'] = (df['Tomorrow'] > df['Close']).astype(int)
-    
-    # Add technical indicators
-    df = add_technical_indicators(df)
-    df = df.dropna()
+    """Enhanced Random Forest prediction with voting classifier and better validation."""
+    try:
+        # Validate data quality
+        validate_data_quality(history)
+        
+        df = history.copy()
+        df['Tomorrow'] = df['Close'].shift(-1)
+        df['Target'] = (df['Tomorrow'] > df['Close']).astype(int)
+        
+        # Add technical indicators
+        df = add_technical_indicators(df)
+        df = df.dropna()
+        
+        features = [col for col in df.columns if col not in ['Tomorrow', 'Target']]
+        X = df[features]
+        y = df['Target']
+        
+        # Scale features
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        X_scaled = pd.DataFrame(X_scaled, columns=features)
+        
+        # Feature selection
+        base_rf = RandomForestClassifier(n_estimators=100, random_state=42)
+        selector = SelectFromModel(base_rf, prefit=False)
+        selector.fit(X_scaled, y)
+        selected_features = X_scaled.columns[selector.get_support()].tolist()
+        X_selected = X_scaled[selected_features]
+        
+        # Create multiple RF models with different parameters
+        rf1 = RandomForestClassifier(n_estimators=500, max_depth=10, min_samples_split=5, random_state=42)
+        rf2 = RandomForestClassifier(n_estimators=500, max_depth=20, min_samples_split=10, random_state=43)
+        rf3 = RandomForestClassifier(n_estimators=500, max_depth=15, min_samples_split=8, random_state=44)
+        
+        # Create voting classifier
+        voting_clf = VotingClassifier(
+            estimators=[('rf1', rf1), ('rf2', rf2), ('rf3', rf3)],
+            voting='soft'
+        )
+        
+        # Stratified K-fold cross-validation
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        cv_scores = cross_val_score(voting_clf, X_selected, y, cv=skf, scoring='accuracy')
+        
+        # Fit the final model
+        voting_clf.fit(X_selected, y)
+        
+        # Make prediction
+        last_data = X_selected.iloc[-1].values.reshape(1, -1)
+        prediction_proba = voting_clf.predict_proba(last_data)[0]
+        prediction = 1 if prediction_proba[1] > 0.5 else 0
+        
+        # Calculate confidence and performance metrics
+        confidence = max(prediction_proba) * 100
+        
+        # Only proceed if confidence meets threshold
+        if confidence < 55:  # Minimum confidence threshold
+            return "uncertain", 0, "Insufficient confidence in prediction"
+        
+        # Generate explanation
+        explanation = generate_rf_explanation(X.iloc[-1], df)
+        
+        return ("increase" if prediction == 1 else "decrease", confidence, explanation)
+        
+    except Exception as e:
+        print(f"Error in Random Forest prediction: {str(e)}")
+        return "uncertain", 0, f"Error in prediction: {str(e)}"
 
-    features = ['Close', 'Volume', 'SMA5', 'SMA20', 'EMA12', 'EMA26', 
-                'MACD', 'MACD_Signal', 'MACD_Hist',
-                'BB_High', 'BB_Low', 'BB_Mid',
-                'RSI', 'Stoch_K', 'Stoch_D',
-                'OBV', 'Force_Index']
-    
-    X = df[features]
-    y = df['Target']
-
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    X_scaled = pd.DataFrame(X_scaled, columns=features)
-
-    # Grid Search for optimal parameters
-    param_grid = {
-        'n_estimators': [200],
-        'max_depth': [10, 20],
-        'min_samples_split': [5, 10],
-        'min_samples_leaf': [2, 4]
-    }
-    
-    rf = RandomForestClassifier(random_state=42)
-    grid_search = GridSearchCV(rf, param_grid, cv=5, scoring='accuracy')
-    grid_search.fit(X_scaled, y)
-    
-    best_model = grid_search.best_estimator_
-    
-    # Cross-validation score
-    cv_scores = cross_val_score(best_model, X_scaled, y, cv=5)
-    cv_confidence = np.mean(cv_scores) * 100
-    
-    # Generate prediction
-    last_data = X_scaled.iloc[-1].values.reshape(1, -1)
-    prediction = best_model.predict(last_data)[0]
-    
-    # Feature importance and explanation
-    feature_importance = dict(zip(features, best_model.feature_importances_))
-    current_values = X.iloc[-1]
-    explanation = generate_rf_explanation(feature_importance, current_values, df)
-    
-    return ("increase" if prediction == 1 else "decrease", cv_confidence, explanation)
-
-def generate_rf_explanation(feature_importance, current_values, df):
-    """Generate detailed explanation for Random Forest prediction."""
+def generate_rf_explanation(current_values, df):
+    """Generate enhanced technical analysis explanation."""
     explanation = []
     
-    # Technical Analysis
-    if current_values['RSI'] > 70:
-        explanation.append("RSI indicates strong overbought conditions (>70)")
-    elif current_values['RSI'] < 30:
-        explanation.append("RSI indicates strong oversold conditions (<30)")
+    # RSI Analysis
+    rsi = current_values['RSI']
+    if rsi > 70:
+        explanation.append(f"Strong overbought conditions (RSI: {rsi:.1f})")
+    elif rsi < 30:
+        explanation.append(f"Strong oversold conditions (RSI: {rsi:.1f})")
     
+    # MACD Analysis
     if current_values['MACD'] > current_values['MACD_Signal']:
-        explanation.append("MACD shows bullish crossover")
+        explanation.append("Bullish MACD crossover")
     else:
-        explanation.append("MACD shows bearish crossover")
+        explanation.append("Bearish MACD crossover")
     
-    if current_values['Close'] > current_values['BB_High']:
-        explanation.append("Price above upper Bollinger Band (overbought)")
-    elif current_values['Close'] < current_values['BB_Low']:
-        explanation.append("Price below lower Bollinger Band (oversold)")
+    # Trend Strength
+    adx = current_values['ADX']
+    if adx > 25:
+        explanation.append(f"Strong trend (ADX: {adx:.1f})")
     
-    # Most important features
-    sorted_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
-    top_features = sorted_features[:3]
-    explanation.append("Top indicators: " + ", ".join([f"{name} ({importance:.2f})" 
-                                                     for name, importance in top_features]))
+    # Volatility
+    if current_values['Volatility_BB'] > 1:
+        explanation.append("High volatility indicated by Bollinger Bands")
+    
+    # Additional Technical Signals
+    if current_values['UO'] > 70:
+        explanation.append("Bullish Ultimate Oscillator")
+    elif current_values['UO'] < 30:
+        explanation.append("Bearish Ultimate Oscillator")
     
     return " | ".join(explanation)
 
 def get_arima_prediction(history):
-    """
-    Predict the stock trend using ARIMA model with enhanced error handling.
-    
-    :param history: pandas DataFrame containing historical stock data
-    :return: dict containing predictions for different time periods
-    """
+    """Enhanced ARIMA prediction with improved confidence calculation."""
     try:
+        # Validate data quality
+        validate_data_quality(history)
+        
         # Resample to daily frequency and handle missing values
-        df = history['Close'].resample('D').last().fillna(method='ffill')
+        df = history['Close'].resample('D').ffill()
         
         # Test for stationarity
         adf_result = adfuller(df)
@@ -189,12 +212,12 @@ def get_arima_prediction(history):
             lower_bound = pd.Series(conf_int['lower'], index=dates)
             upper_bound = pd.Series(conf_int['upper'], index=dates)
             
-            # Calculate trend and confidence
+            # Calculate trend
             trend = "increase" if forecast_series.mean() > df.iloc[-1] else "decrease"
             
-            # Calculate confidence score based on prediction intervals
-            confidence_range = (upper_bound - lower_bound) / forecast_series
-            confidence = (100 - np.mean(confidence_range) * 100).clip(0, 100)
+            # Improved confidence calculation as per manager's request
+            confidence_range = np.mean((upper_bound - lower_bound) / forecast_series)
+            confidence = max(min(100 - (confidence_range * 100), 100), 0)
             
             forecasts[period] = {
                 'prediction': trend,
@@ -210,7 +233,3 @@ def get_arima_prediction(history):
     except Exception as e:
         print(f"Error in ARIMA prediction: {str(e)}")
         return None
-
-def calculate_rsi(prices, period=14):
-    """Calculate RSI indicator."""
-    return ta.momentum.rsi(prices, window=period)
