@@ -8,7 +8,9 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.arima.model import ARIMA
 import datetime
-import ta
+import ta.trend
+import ta.momentum
+import ta.volatility
 
 def validate_data_quality(df):
     """Check data quality and completeness."""
@@ -233,3 +235,23 @@ def get_arima_prediction(history):
     except Exception as e:
         print(f"Error in ARIMA prediction: {str(e)}")
         return None
+
+def predict_stock_trend(history):
+    '''Combine Random Forest and ARIMA predictions'''
+    try:
+        # Get Random Forest predictions
+        rf_prediction, rf_confidence, rf_explanation = random_forest_prediction(history)
+        
+        # Get ARIMA predictions
+        arima_predictions = get_arima_prediction(history)
+        
+        return {
+            'Random Forest': (rf_prediction, rf_confidence, rf_explanation),
+            'ARIMA': arima_predictions
+        }
+    except Exception as e:
+        print(f"Error in prediction: {str(e)}")
+        return {
+            'Random Forest': ("uncertain", 0, f"Error: {str(e)}"),
+            'ARIMA': None
+        }
