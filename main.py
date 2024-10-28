@@ -14,10 +14,7 @@ COMPANY_SYMBOLS = {
     'Amazon': 'AMZN', 'Tesla': 'TSLA', 'Meta': 'META', 'Facebook': 'META',
     'Netflix': 'NFLX', 'NVIDIA': 'NVDA', 'Intel': 'INTC', 'AMD': 'AMD',
     'Coca-Cola': 'KO', 'Disney': 'DIS', 'Nike': 'NKE', "McDonald's": 'MCD',
-    'Boeing': 'BA', 'JPMorgan': 'JPM', 'Walmart': 'WMT', 'Visa': 'V',
-    'Johnson & Johnson': 'JNJ', 'Procter & Gamble': 'PG', 'UnitedHealth': 'UNH',
-    'Home Depot': 'HD', 'Mastercard': 'MA', 'Bank of America': 'BAC',
-    'Pfizer': 'PFE', 'Chevron': 'CVX', 'Merck': 'MRK', 'Exxon Mobil': 'XOM'
+    'Boeing': 'BA', 'JPMorgan': 'JPM', 'Walmart': 'WMT', 'Visa': 'V'
 }
 
 def fetch_historical_data_for_symbol(symbol):
@@ -116,10 +113,17 @@ def display_top_performers(period_days, performances_df):
     )
 
 # Set page config
-st.set_page_config(page_title="Stock Data Visualization and Prediction", layout="wide")
+st.set_page_config(
+    page_title="Stock Market Insights",
+    page_icon="📈",
+    layout="wide"
+)
+
+# Add title and description
+st.title("Stock Market Insights")
+st.write("Advanced stock analysis and prediction platform with investment calculator")
 
 # Add Top Performers section
-st.title("Stock Data Visualization and Prediction")
 st.header("Top 10 Performing Stocks")
 
 # Initialize session state for caching
@@ -307,10 +311,118 @@ if company_name:
                                         st.plotly_chart(fig, use_container_width=True)
                             else:
                                 st.error("ARIMA prediction failed. This might be due to insufficient or invalid data.")
-                        
-                        st.write("---")
-                        st.write("Note: These predictions are based on historical data and should not be used as financial advice.")
-                        
+
+                        # Investment Calculator Section
+                        st.header("Investment Calculator")
+                        investment_amount = st.number_input("Enter investment amount ($)", min_value=100, step=100, value=1000)
+
+                        if arima_predictions:
+                            # Create investment analysis table
+                            investment_data = []
+                            
+                            for period in [7, 15, 30, 90, 120]:
+                                forecast = arima_predictions[period]
+                                current_price = forecast['last_price']
+                                
+                                # Calculate number of shares
+                                shares = investment_amount / current_price
+                                
+                                # Calculate predicted values
+                                predicted_price = forecast['daily_forecasts'][-1]
+                                upper_price = forecast['upper_bound'][-1]
+                                lower_price = forecast['lower_bound'][-1]
+                                
+                                # Calculate returns
+                                predicted_value = shares * predicted_price
+                                potential_gain = predicted_value - investment_amount
+                                potential_return = (potential_gain / investment_amount) * 100
+                                
+                                # Calculate best/worst case
+                                best_case = shares * upper_price - investment_amount
+                                worst_case = shares * lower_price - investment_amount
+                                
+                                # Determine risk level based on confidence intervals
+                                price_range = upper_price - lower_price
+                                price_volatility = price_range / predicted_price
+                                risk_level = "High" if price_volatility > 0.15 else "Medium" if price_volatility > 0.07 else "Low"
+                                
+                                investment_data.append({
+                                    "Timeframe": f"{period} Days",
+                                    "Predicted Value": f"${predicted_value:,.2f}",
+                                    "Potential Gain/Loss": f"${potential_gain:,.2f}",
+                                    "Return": f"{potential_return:.1f}%",
+                                    "Risk Level": risk_level,
+                                    "Best Case": best_case,
+                                    "Worst Case": worst_case,
+                                    "Timeline": forecast['daily_forecasts'].index,
+                                    "Values": forecast['daily_forecasts'] * (investment_amount / current_price),
+                                    "Upper": forecast['upper_bound'] * (investment_amount / current_price),
+                                    "Lower": forecast['lower_bound'] * (investment_amount / current_price)
+                                })
+                            
+                            # Display investment analysis table
+                            st.subheader("Investment Analysis")
+                            investment_df = pd.DataFrame(investment_data)
+                            st.table(investment_df[["Timeframe", "Predicted Value", "Potential Gain/Loss", "Return", "Risk Level"]])
+                            
+                            # Create investment growth chart
+                            st.subheader("Potential Investment Growth")
+                            selected_period = st.selectbox("Select timeframe", [7, 15, 30, 90, 120], format_func=lambda x: f"{x} Days")
+                            
+                            selected_data = next(data for data in investment_data if data["Timeframe"] == f"{selected_period} Days")
+                            
+                            fig = go.Figure()
+                            
+                            # Add initial investment line
+                            fig.add_hline(y=investment_amount, line_dash="dash", line_color="gray", name="Initial Investment")
+                            
+                            # Add predicted growth
+                            fig.add_trace(go.Scatter(
+                                x=selected_data["Timeline"],
+                                y=selected_data["Values"],
+                                name="Expected Growth",
+                                line=dict(color="blue")
+                            ))
+                            
+                            # Add confidence intervals
+                            fig.add_trace(go.Scatter(
+                                x=selected_data["Timeline"],
+                                y=selected_data["Upper"],
+                                fill=None,
+                                mode="lines",
+                                line_color="rgba(0,100,80,0.2)",
+                                name="Optimistic Scenario"
+                            ))
+                            
+                            fig.add_trace(go.Scatter(
+                                x=selected_data["Timeline"],
+                                y=selected_data["Lower"],
+                                fill="tonexty",
+                                mode="lines",
+                                line_color="rgba(0,100,80,0.2)",
+                                name="Pessimistic Scenario"
+                            ))
+                            
+                            fig.update_layout(
+                                title=f"Potential {selected_period}-Day Investment Growth",
+                                xaxis_title="Date",
+                                yaxis_title="Investment Value ($)",
+                                showlegend=True,
+                                height=500
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            st.write("""
+                            **Note:**
+                            - The expected growth line shows the most likely path based on historical data and current trends.
+                            - The shaded area represents the range of potential outcomes, with the upper and lower bounds showing optimistic and pessimistic scenarios.
+                            - Risk levels are calculated based on the volatility of predictions:
+                                - Low: Less than 7% price variation
+                                - Medium: 7-15% price variation
+                                - High: More than 15% price variation
+                            """)
+
             except Exception as e:
                 st.error(f"Error fetching data for {stock_symbol}. Please try again.")
                 st.exception(e)
