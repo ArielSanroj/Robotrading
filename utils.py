@@ -13,6 +13,8 @@ import ta.momentum
 import ta.volatility
 from textblob import TextBlob
 import yfinance as yf
+import re
+from datetime import datetime, timedelta
 
 def validate_data_quality(df):
     """Check data quality and completeness."""
@@ -71,8 +73,59 @@ def add_technical_indicators(df):
         print(f"Error in technical indicators calculation: {str(e)}")
         return df
 
-def get_stock_news(symbol, limit=10):
-    """Fetch and analyze news for a given stock symbol"""
+def extract_price_impact(text):
+    """Extract specific price impact mentions from article text."""
+    price_patterns = [
+        r'(?:up|down|rise|fall|drop|jump|surge|plunge|increase|decrease)(?:\s+by\s+)?(\d+(?:\.\d+)?%?)',
+        r'(\d+(?:\.\d+)?%?)(?:\s+)?(?:gain|loss|higher|lower)',
+        r'price target(?:\s+of\s+)?\$(\d+(?:\.\d+)?)',
+    ]
+    
+    impacts = []
+    for pattern in price_patterns:
+        matches = re.finditer(pattern, text.lower())
+        for match in matches:
+            impacts.append(match.group())
+    
+    return impacts
+
+def calculate_relevance_score(article, current_price):
+    """Calculate article relevance score based on content and date."""
+    score = 0
+    
+    # Time relevance (max 40 points)
+    pub_time = article.get('providerPublishTime', 0)
+    if pub_time:
+        hours_ago = (datetime.now() - datetime.fromtimestamp(pub_time)).total_seconds() / 3600
+        if hours_ago <= 6:
+            score += 40
+        elif hours_ago <= 12:
+            score += 35
+        elif hours_ago <= 24:
+            score += 30
+        elif hours_ago <= 48:
+            score += 20
+        else:
+            score += 10
+    
+    # Content relevance (max 60 points)
+    text = f"{article.get('title', '')} {article.get('summary', '')}"
+    
+    # Check for price mentions
+    price_impacts = extract_price_impact(text)
+    score += len(price_impacts) * 10
+    
+    # Check for important keywords
+    keywords = ['earnings', 'revenue', 'profit', 'guidance', 'forecast', 'analyst', 'upgrade', 'downgrade']
+    for keyword in keywords:
+        if keyword in text.lower():
+            score += 5
+    
+    # Cap the total score at 100
+    return min(score, 100)
+
+def get_stock_news(symbol, limit=15):
+    """Fetch and analyze news for a given stock symbol with enhanced credibility scoring"""
     try:
         stock = yf.Ticker(symbol)
         news = stock.news
@@ -80,27 +133,65 @@ def get_stock_news(symbol, limit=10):
         if not news:
             return None
         
-        CREDIBLE_SOURCES = ['Wall Street Journal', 'Financial Times', 'Reuters', 'Bloomberg', 
-                           'CNBC', 'MarketWatch', 'Barron\'s', 'Forbes', 'WSJ', 'FT']
+        # Define credible sources with their credibility scores
+        CREDIBLE_SOURCES = {
+            'Wall Street Journal': 95,
+            'WSJ': 95,
+            'Financial Times': 95,
+            'FT': 95,
+            'Reuters': 90,
+            'Bloomberg': 90,
+            'CNBC': 85,
+            'MarketWatch': 80,
+            'Barron\'s': 80,
+            'Forbes': 75
+        }
         
+        current_price = stock.info.get('currentPrice', 0)
         analyzed_news = []
-        for article in news[:limit]:
+        
+        for article in news:
             source = article.get('publisher', '')
-            if any(src.lower() in source.lower() for src in CREDIBLE_SOURCES):
+            credibility_score = 0
+            
+            # Calculate source credibility score
+            for credible_source, score in CREDIBLE_SOURCES.items():
+                if credible_source.lower() in source.lower():
+                    credibility_score = score
+                    break
+            
+            if credibility_score > 0:  # Only include articles from credible sources
                 headline = article.get('title', '')
-                blob = TextBlob(headline)
+                summary = article.get('summary', '')
+                full_text = f"{headline} {summary}"
+                
+                # Calculate sentiment
+                blob = TextBlob(full_text)
                 sentiment_score = blob.sentiment.polarity
+                
+                # Calculate relevance score
+                relevance_score = calculate_relevance_score(article, current_price)
+                
+                # Extract price impacts
+                price_impacts = extract_price_impact(full_text)
                 
                 analyzed_news.append({
                     'headline': headline,
                     'source': source,
                     'url': article.get('link', ''),
-                    'published': article.get('providerPublishTime', ''),
+                    'published': datetime.fromtimestamp(article.get('providerPublishTime', 0)).strftime('%Y-%m-%d %H:%M:%S'),
                     'sentiment': sentiment_score,
-                    'summary': article.get('summary', '')
+                    'credibility_score': credibility_score,
+                    'relevance_score': relevance_score,
+                    'summary': summary,
+                    'price_impacts': price_impacts
                 })
         
-        analyzed_news.sort(key=lambda x: (abs(x['sentiment']), x['published']), reverse=True)
+        # Sort by weighted score (credibility * relevance * abs(sentiment))
+        analyzed_news.sort(key=lambda x: (
+            x['credibility_score'] * x['relevance_score'] * (abs(x['sentiment']) + 0.1)
+        ), reverse=True)
+        
         return analyzed_news[:3]
         
     except Exception as e:
@@ -108,21 +199,33 @@ def get_stock_news(symbol, limit=10):
         return None
 
 def calculate_news_sentiment_score(news_data):
-    """Calculate overall news sentiment score"""
+    """Calculate overall news sentiment score with enhanced analysis"""
     if not news_data:
         return 0.0, []
     
-    total_sentiment = sum(article['sentiment'] for article in news_data)
-    avg_sentiment = total_sentiment / len(news_data)
+    # Calculate weighted sentiment score
+    weighted_sentiments = []
+    for article in news_data:
+        weight = (article['credibility_score'] * article['relevance_score']) / 10000
+        weighted_sentiments.append(article['sentiment'] * weight)
+    
+    avg_sentiment = sum(weighted_sentiments) / len(weighted_sentiments) if weighted_sentiments else 0
     
     news_impacts = []
     for article in news_data:
         sentiment_str = "positive" if article['sentiment'] > 0 else "negative" if article['sentiment'] < 0 else "neutral"
+        impact_strength = "strong" if abs(article['sentiment']) > 0.5 else "moderate" if abs(article['sentiment']) > 0.2 else "slight"
+        
         impact = {
             'headline': article['headline'],
-            'source': article['source'],
+            'source': f"{article['source']} (Credibility: {article['credibility_score']}%)",
             'url': article['url'],
-            'impact': f"This {sentiment_str} news suggests {'upward' if article['sentiment'] > 0 else 'downward'} pressure on the stock price"
+            'published': article['published'],
+            'impact': (
+                f"This {impact_strength} {sentiment_str} news from a highly credible source suggests "
+                f"{'upward' if article['sentiment'] > 0 else 'downward'} pressure on the stock price. "
+                f"{'Price impacts mentioned: ' + ', '.join(article['price_impacts']) if article['price_impacts'] else ''}"
+            )
         }
         news_impacts.append(impact)
     
@@ -150,6 +253,19 @@ def generate_technical_explanation(current_values):
         adx = current_values['ADX']
         if adx > 25:
             explanation.append(f"Strong trend strength (ADX: {adx:.1f})")
+            
+    if 'BB_Band' in current_values:
+        bb = current_values['BB_Band']
+        if bb > 0.8:
+            explanation.append("Price near upper Bollinger Band (potential resistance)")
+        elif bb < 0.2:
+            explanation.append("Price near lower Bollinger Band (potential support)")
+            
+    if all(x in current_values for x in ['SMA5', 'SMA20']):
+        if current_values['SMA5'] > current_values['SMA20']:
+            explanation.append("Short-term uptrend (5-day SMA above 20-day)")
+        else:
+            explanation.append("Short-term downtrend (5-day SMA below 20-day)")
     
     if not explanation:
         explanation.append("Limited technical indicators available")
@@ -186,32 +302,38 @@ def random_forest_prediction(history, symbol=None):
         X_scaled = scaler.fit_transform(X)
         X_scaled = pd.DataFrame(X_scaled, columns=features)
         
-        # Create and train multiple RF models
+        # Create and train multiple RF models with different configurations
         rf1 = RandomForestClassifier(n_estimators=200, max_depth=10, random_state=42)
         rf2 = RandomForestClassifier(n_estimators=200, max_depth=15, random_state=43)
         rf3 = RandomForestClassifier(n_estimators=200, max_depth=20, random_state=44)
         
+        # Create ensemble with voting
         voting_clf = VotingClassifier(
             estimators=[('rf1', rf1), ('rf2', rf2), ('rf3', rf3)],
             voting='soft'
         )
         
+        # Train the ensemble
         voting_clf.fit(X_scaled, y)
         
+        # Make prediction with probability
         last_data = X_scaled.iloc[-1].values.reshape(1, -1)
         prediction_proba = voting_clf.predict_proba(last_data)[0]
         prediction = "increase" if prediction_proba[1] > 0.5 else "decrease"
         confidence = max(prediction_proba) * 100
         
+        # Generate technical analysis explanation
         technical_explanation = generate_technical_explanation(X.iloc[-1])
         
+        # Combine technical and news analysis
         final_explanation = {
             'technical_analysis': technical_explanation,
             'news_analysis': news_impacts if news_impacts else None,
             'combined_analysis': (
                 f"Based on {'both ' if news_impacts else ''}technical analysis{' and recent news' if news_impacts else ''}, "
-                f"the model predicts a {prediction} trend. "
-                f"{'News sentiment is ' + ('positive' if news_sentiment > 0 else 'negative' if news_sentiment < 0 else 'neutral') + '.' if news_impacts else ''}"
+                f"the model predicts a {prediction} trend with {confidence:.1f}% confidence. "
+                f"{'News sentiment is ' + ('positive' if news_sentiment > 0 else 'negative' if news_sentiment < 0 else 'neutral') + '. ' if news_impacts else ''}"
+                f"Technical indicators show: {technical_explanation}."
             )
         }
         
@@ -230,43 +352,54 @@ def get_arima_prediction(history, symbol=None):
         news_data = get_stock_news(symbol) if symbol else None
         news_sentiment, news_impacts = calculate_news_sentiment_score(news_data)
         
+        # Prepare data for ARIMA
         df = history['Close'].resample('D').ffill()
         
+        # Check stationarity
         adf_result = adfuller(df)
         is_stationary = adf_result[1] < 0.05
         d = 0 if is_stationary else 1
         
+        # Make data stationary if needed
         if not is_stationary:
             df = df.diff().dropna()
         
+        # Fit ARIMA model
         model = ARIMA(df, order=(2, d, 2))
         results = model.fit()
         
+        # Generate forecasts for different periods
         periods = [7, 15, 30, 90, 120]
         forecasts = {}
         
         for period in periods:
+            # Get forecast with confidence intervals
             forecast = results.get_forecast(steps=period)
             mean_forecast = forecast.predicted_mean
             conf_int = forecast.conf_int(alpha=0.05)
             
+            # Transform back if data was differenced
             if not is_stationary:
                 mean_forecast = np.cumsum(mean_forecast) + history['Close'].iloc[-1]
                 conf_int = pd.DataFrame(np.cumsum(conf_int, axis=0), columns=['lower', 'upper'])
                 conf_int += history['Close'].iloc[-1]
             
+            # Create forecast dates
             dates = [df.index[-1] + datetime.timedelta(days=i+1) for i in range(period)]
             
+            # Create forecast series
             forecast_series = pd.Series(mean_forecast, index=dates)
             lower_bound = pd.Series(conf_int['lower'], index=dates)
             upper_bound = pd.Series(conf_int['upper'], index=dates)
             
+            # Adjust forecasts based on news sentiment
             if news_sentiment != 0:
-                sentiment_adjustment = news_sentiment * 0.02
+                sentiment_adjustment = news_sentiment * 0.02  # 2% adjustment per unit of sentiment
                 forecast_series *= (1 + sentiment_adjustment)
                 lower_bound *= (1 + sentiment_adjustment)
                 upper_bound *= (1 + sentiment_adjustment)
             
+            # Calculate trend and confidence
             trend = "increase" if forecast_series.mean() > df.iloc[-1] else "decrease"
             confidence_range = np.mean((upper_bound - lower_bound) / forecast_series)
             confidence = max(min(100 - (confidence_range * 100), 100), 35)
