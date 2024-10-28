@@ -313,9 +313,11 @@ if company_name:
                                 st.error("ARIMA prediction failed. This might be due to insufficient or invalid data.")
 
                         # Investment Calculator Section
-                        st.header("Investment Calculator")
+                        st.header(f"Investment Calculator - {selected_company} ({stock_symbol})")
+                        st.write(f"Calculate potential returns for your investment in {selected_company} based on our prediction models.")
+                        st.write(f"Current Stock Price: ${info['currentPrice']:.2f}")
                         investment_amount = st.number_input("Enter investment amount ($)", min_value=100, step=100, value=1000)
-
+                        
                         if arima_predictions:
                             # Create investment analysis table
                             investment_data = []
