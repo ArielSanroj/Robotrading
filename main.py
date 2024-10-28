@@ -224,18 +224,28 @@ if company_name:
                             mime="text/csv"
                         )
                         
-                        # Stock prediction
+                        # Stock prediction section
                         st.header("Stock Price Predictions")
                         with st.spinner('Generating predictions...'):
-                            predictions = predict_stock_trend(history)
+                            predictions = predict_stock_trend(history, stock_symbol)
                             
                             # Display Random Forest predictions
                             rf_pred, rf_conf, rf_explanation = predictions['Random Forest']
                             st.subheader("Random Forest Model Prediction")
                             st.write(f"**Prediction:** The stock is expected to {rf_pred} over the next 7 days")
                             st.write(f"**Confidence:** {rf_conf:.2f}%")
+                            
+                            # Display enhanced analysis
                             st.write("**Technical Analysis:**")
-                            st.write(rf_explanation)
+                            st.write(rf_explanation['technical_analysis'])
+                            
+                            if rf_explanation['news_analysis']:
+                                st.write("**Recent News Impact:**")
+                                for news in rf_explanation['news_analysis']:
+                                    st.markdown(f"- **{news['source']}:** [{news['headline']}]({news['url']}) - {news['impact']}")
+                            
+                            st.write("**Overall Analysis:**")
+                            st.write(rf_explanation['combined_analysis'])
                             st.write("---")
                             
                             # Display ARIMA predictions
@@ -253,6 +263,11 @@ if company_name:
                                         st.write(f"**{period}-Day Forecast**")
                                         st.write(f"**Prediction:** The stock is expected to {forecast_data['prediction']} over the next {period} days")
                                         st.write(f"**Confidence:** {forecast_data['confidence']:.2f}%")
+                                        
+                                        if forecast_data.get('news_analysis'):
+                                            st.write("**News Impact on Forecast:**")
+                                            for news in forecast_data['news_analysis']:
+                                                st.markdown(f"- **{news['source']}:** [{news['headline']}]({news['url']}) - {news['impact']}")
                                         
                                         # Plot forecast with confidence intervals
                                         fig = go.Figure()
