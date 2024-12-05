@@ -22,8 +22,19 @@ COMPANY_SYMBOLS = {
 def fetch_stock_data(symbol, period="1y"):
     """Fetch stock data with caching"""
     try:
+        # Convert period format if needed
+        if period.endswith('d'):
+            yf_period = period  # yfinance accepts '30d' format
+        else:
+            # Convert year format to yfinance format
+            years = int(period.replace('y', ''))
+            if years <= 2:
+                yf_period = f"{years}y"
+            else:
+                yf_period = "max"  # For periods > 2 years, use max data
+        
         stock = yf.Ticker(symbol)
-        history = stock.history(period=period)
+        history = stock.history(period=yf_period)
         return history, stock.info
     except Exception as e:
         st.error(f"Error fetching data for {symbol}: {str(e)}")
@@ -116,7 +127,7 @@ if len(selected_companies) > 1:
     # Time period selection
     comparison_period = st.selectbox(
         "Select time period",
-        options=["1mo", "3mo", "6mo", "1y", "2y", "5y"],
+        options=["30d", "90d", "180d", "1y", "2y", "5y"],
         index=3
     )
     
@@ -275,8 +286,16 @@ if company_search:
                 
                 # Price History Chart
                 st.subheader("Price History")
-                timeframe = st.selectbox("Select timeframe:", ["1mo", "3mo", "6mo", "1y", "2y"], index=3)
-                history_subset = history[history.index > (pd.Timestamp.now() - pd.Timedelta(timeframe))]
+                timeframe = st.selectbox("Select timeframe:", ["30d", "90d", "180d", "1y", "2y"], index=3)
+                # Calculate the date range based on timeframe
+                if 'd' in timeframe:
+                    days = int(timeframe.replace('d', ''))
+                    cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=days)
+                else:
+                    years = int(timeframe.replace('y', ''))
+                    cutoff_date = pd.Timestamp.now() - pd.DateOffset(years=years)
+                
+                history_subset = history[history.index > cutoff_date]
                 
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(
