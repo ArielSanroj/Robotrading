@@ -111,6 +111,79 @@ st.set_page_config(
 # Add title and description
 st.title("Stock Market Insights")
 st.write("Advanced stock analysis and prediction platform with investment calculator")
+@st.cache_data(ttl=3600)
+def get_top_performers(period="1mo"):
+    """Fetch top performing stocks with caching"""
+    try:
+        # List of major stocks (S&P 500 top components)
+        major_stocks = [
+            'AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META', 'BRK-B', 'LLY', 'AVGO', 'JPM',
+            'V', 'XOM', 'MA', 'UNH', 'JNJ', 'PG', 'HD', 'ABBV', 'MRK', 'CVX',
+            'KO', 'PEP', 'BAC', 'COST', 'AMD', 'MCD', 'CSCO', 'CRM', 'ADBE', 'WMT'
+        ]
+        
+        performance_data = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_stock = {
+                executor.submit(yf.Ticker, symbol): symbol 
+                for symbol in major_stocks
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_stock):
+                symbol = future_to_stock[future]
+                try:
+                    stock = future.result()
+                    info = stock.info
+                    history = stock.history(period=period)
+                    
+                    if not history.empty:
+                        start_price = history['Close'].iloc[0]
+                        current_price = history['Close'].iloc[-1]
+                        change_pct = ((current_price - start_price) / start_price) * 100
+                        
+                        performance_data.append({
+                            'Symbol': symbol,
+                            'Company': info.get('shortName', symbol),
+                            'Price': f"${current_price:.2f}",
+                            'Change %': change_pct,
+                            'Change_Numeric': change_pct  # For sorting
+                        })
+                except Exception as e:
+                    print(f"Error fetching data for {symbol}: {str(e)}")
+        
+        # Convert to DataFrame and sort by performance
+        df = pd.DataFrame(performance_data)
+        df = df.sort_values('Change_Numeric', ascending=False).head(15)
+        
+        # Format the Change % column with colors
+        df['Change %'] = df['Change %'].apply(
+            lambda x: f"{'🔼' if x > 0 else '🔽'} {abs(x):.2f}%"
+        )
+        
+        # Drop the numeric column used for sorting
+        df = df.drop('Change_Numeric', axis=1)
+        
+        return df
+    except Exception as e:
+        st.error(f"Error fetching top performers: {str(e)}")
+        return pd.DataFrame(columns=['Symbol', 'Company', 'Price', 'Change %'])
+
+# Top Performers Section
+st.subheader("Top 15 Performing Stocks")
+tabs = st.tabs(["1 Week", "1 Month", "3 Months", "6 Months", "12 Months"])
+periods = ["7d", "1mo", "3mo", "6mo", "1y"]
+
+for tab, period in zip(tabs, periods):
+    with tab:
+        with st.spinner('Fetching top performers...'):
+            top_stocks = get_top_performers(period)
+            st.dataframe(
+                top_stocks,
+                hide_index=True,
+                use_container_width=True
+            )
+
+st.write("---")  # Add separator
 
 # Add Stock Comparison Section
 st.header("Stock Comparison Analysis")
