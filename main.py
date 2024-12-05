@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from utils import predict_stock_trend
 from fuzzywuzzy import process
@@ -17,100 +18,77 @@ COMPANY_SYMBOLS = {
     'Boeing': 'BA', 'JPMorgan': 'JPM', 'Walmart': 'WMT', 'Visa': 'V'
 }
 
-def fetch_historical_data_for_symbol(symbol):
-    """Fetch historical data for a single symbol with enhanced error handling"""
+@st.cache_data(ttl=3600)
+def fetch_stock_data(symbol, period="1y"):
+    """Fetch stock data with caching"""
     try:
         stock = yf.Ticker(symbol)
-        history = stock.history(period="3mo")
-        if history.empty:
-            print(f"No data available for {symbol}")
-            return symbol, None
-        return symbol, history
+        history = stock.history(period=period)
+        return history, stock.info
     except Exception as e:
-        print(f"Error fetching data for {symbol}: {str(e)}")
-        return symbol, None
+        st.error(f"Error fetching data for {symbol}: {str(e)}")
+        return None, None
 
-def calculate_performance(history, days):
-    """Calculate percentage gain over specified business days"""
-    if history is None or len(history) < days:
+def calculate_metrics(history):
+    """Calculate key financial metrics"""
+    if history is None or len(history) < 1:
         return None
     
-    try:
-        history.index = pd.to_datetime(history.index)
-        end_date = history.index[-1]
-        start_date = end_date - BDay(days)
-        
-        closest_end = history.index[history.index <= end_date][-1]
-        closest_start = history.index[history.index >= start_date][0]
-        
-        current_price = history.loc[closest_end, 'Close']
-        past_price = history.loc[closest_start, 'Close']
-        
-        return ((current_price - past_price) / past_price) * 100
-    except Exception as e:
-        print(f"Error calculating performance: {str(e)}")
-        return None
+    current_price = history['Close'].iloc[-1]
+    high_52week = history['High'].max()
+    low_52week = history['Low'].min()
+    daily_returns = history['Close'].pct_change()
+    
+    metrics = {
+        'Current Price': f"${current_price:.2f}",
+        '52-Week High': f"${high_52week:.2f}",
+        '52-Week Low': f"${low_52week:.2f}",
+        'Volatility (Daily)': f"{daily_returns.std() * 100:.2f}%",
+        'YTD Return': f"{((current_price / history['Close'].iloc[0]) - 1) * 100:.2f}%"
+    }
+    
+    return metrics
 
-def get_top_performing_stocks(period_days):
-    """Get top performing stocks with parallel processing"""
-    performances = []
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_symbol = {
-            executor.submit(fetch_historical_data_for_symbol, symbol): (name, symbol)
-            for name, symbol in COMPANY_SYMBOLS.items()
-        }
-        
-        for future in concurrent.futures.as_completed(future_to_symbol):
-            company_name, symbol = future_to_symbol[future]
-            try:
-                symbol, history = future.result()
-                if history is not None:
-                    gain = calculate_performance(history, period_days)
-                    if gain is not None:
-                        performances.append({
-                            'Company': company_name,
-                            'Symbol': symbol,
-                            'Gain': gain
-                        })
-            except Exception as e:
-                print(f"Error processing {symbol}: {str(e)}")
-    
-    return pd.DataFrame(performances)
-
-def display_top_performers(period_days, performances_df):
-    """Display top performers chart and data"""
-    if performances_df.empty:
-        st.warning("No performance data available for this period.")
-        return
-    
-    # Get top 10 performers
-    top_10 = performances_df.nlargest(10, 'Gain')
-    
-    # Create bar chart
+def plot_comparison_chart(stock_data_dict, chart_type="Price"):
+    """Create comparative chart for selected stocks"""
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=top_10['Company'] + ' (' + top_10['Symbol'] + ')',
-        y=top_10['Gain'],
-        text=top_10['Gain'].round(2).astype(str) + '%',
-        textposition='auto',
-    ))
+    
+    for company, data in stock_data_dict.items():
+        if data is not None:
+            if chart_type == "Price":
+                y_data = data['Close']
+                title = "Stock Price Comparison"
+                yaxis_title = "Price (USD)"
+            else:  # Normalized
+                y_data = (data['Close'] / data['Close'].iloc[0]) * 100
+                title = "Normalized Price Comparison (Base 100)"
+                yaxis_title = "Normalized Price"
+                
+            fig.add_trace(go.Scatter(
+                x=data.index,
+                y=y_data,
+                name=company,
+                mode='lines'
+            ))
     
     fig.update_layout(
-        title=f'Top 10 Performers - {period_days} Days',
-        xaxis_title="Company",
-        yaxis_title="Gain (%)",
-        showlegend=False,
-        height=500
+        title=title,
+        xaxis_title="Date",
+        yaxis_title=yaxis_title,
+        height=600,
+        showlegend=True
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    return fig
+
+def create_comparison_metrics_table(metrics_dict):
+    """Create a comparative metrics table"""
+    if not metrics_dict:
+        return None
     
-    # Display data table
-    st.dataframe(
-        top_10.style.format({'Gain': '{:.2f}%'}),
-        hide_index=True
-    )
+    # Convert metrics dictionary to DataFrame
+    df = pd.DataFrame.from_dict(metrics_dict, orient='index')
+    return df
 
 # Set page config
 st.set_page_config(
@@ -123,312 +101,348 @@ st.set_page_config(
 st.title("Stock Market Insights")
 st.write("Advanced stock analysis and prediction platform with investment calculator")
 
-# Add Top Performers section
-st.header("Top 10 Performing Stocks")
+# Add Stock Comparison Section
+st.header("Stock Comparison Analysis")
 
-# Initialize session state for caching
-if 'performance_cache' not in st.session_state:
-    st.session_state.performance_cache = {}
+# Multi-select for stocks
+selected_companies = st.multiselect(
+    "Select companies to compare (2-4 recommended)",
+    options=list(COMPANY_SYMBOLS.keys()),
+    default=["Apple", "Microsoft"],
+    max_selections=4
+)
 
-# Create tabs for different time periods
-period_tabs = st.tabs(["30 Days", "60 Days", "90 Days", "120 Days"])
-periods = [30, 60, 90, 120]
-
-# Display performance data in tabs
-for tab, period in zip(period_tabs, periods):
-    with tab:
-        if period not in st.session_state.performance_cache:
-            with st.spinner(f'Fetching {period}-day performance data...'):
-                performances = get_top_performing_stocks(period)
-                st.session_state.performance_cache[period] = performances
+if len(selected_companies) > 1:
+    # Time period selection
+    comparison_period = st.selectbox(
+        "Select time period",
+        options=["1mo", "3mo", "6mo", "1y", "2y", "5y"],
+        index=3
+    )
+    
+    # Chart type selection
+    chart_type = st.radio(
+        "Select chart type",
+        options=["Price", "Normalized"],
+        horizontal=True
+    )
+    
+    # Fetch data for selected companies
+    stock_data = {}
+    metrics_data = {}
+    
+    with st.spinner('Fetching data for selected companies...'):
+        for company in selected_companies:
+            symbol = COMPANY_SYMBOLS[company]
+            history, info = fetch_stock_data(symbol, comparison_period)
+            
+            if history is not None:
+                stock_data[company] = history
+                metrics_data[company] = calculate_metrics(history)
+    
+    # Display comparison chart
+    if stock_data:
+        st.plotly_chart(plot_comparison_chart(stock_data, chart_type), use_container_width=True)
         
-        display_top_performers(period, st.session_state.performance_cache[period])
-
-# Add refresh button
-if st.button("Refresh Performance Data"):
-    st.session_state.performance_cache = {}
-    st.rerun()
+        # Display metrics comparison
+        st.subheader("Comparative Metrics")
+        metrics_df = create_comparison_metrics_table(metrics_data)
+        if metrics_df is not None:
+            st.dataframe(metrics_df, height=200)
+        
+        # Performance Analysis
+        st.subheader("Performance Analysis")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Volatility comparison
+            volatilities = {company: data['Close'].pct_change().std() * 100 
+                          for company, data in stock_data.items()}
+            
+            fig_vol = go.Figure([go.Bar(
+                x=list(volatilities.keys()),
+                y=list(volatilities.values()),
+                text=[f"{v:.2f}%" for v in volatilities.values()],
+                textposition='auto'
+            )])
+            fig_vol.update_layout(
+                title="Volatility Comparison",
+                yaxis_title="Volatility (%)",
+                height=400
+            )
+            st.plotly_chart(fig_vol, use_container_width=True)
+        
+        with col2:
+            # Total return comparison
+            returns = {company: ((data['Close'].iloc[-1] / data['Close'].iloc[0]) - 1) * 100 
+                      for company, data in stock_data.items()}
+            
+            fig_ret = go.Figure([go.Bar(
+                x=list(returns.keys()),
+                y=list(returns.values()),
+                text=[f"{v:.2f}%" for v in returns.values()],
+                textposition='auto'
+            )])
+            fig_ret.update_layout(
+                title=f"Total Return Comparison ({comparison_period})",
+                yaxis_title="Return (%)",
+                height=400
+            )
+            st.plotly_chart(fig_ret, use_container_width=True)
+        
+        # Correlation Analysis
+        st.subheader("Correlation Analysis")
+        returns_df = pd.DataFrame({
+            company: data['Close'].pct_change() 
+            for company, data in stock_data.items()
+        })
+        correlation_matrix = returns_df.corr()
+        
+        fig_corr = go.Figure(data=go.Heatmap(
+            z=correlation_matrix,
+            x=correlation_matrix.columns,
+            y=correlation_matrix.columns,
+            text=[[f"{val:.2f}" for val in row] for row in correlation_matrix.values],
+            texttemplate="%{text}",
+            textfont={"size": 10},
+            hoverongaps=False
+        ))
+        fig_corr.update_layout(
+            title="Return Correlation Matrix",
+            height=400
+        )
+        st.plotly_chart(fig_corr, use_container_width=True)
+        
+        # Trading Volume Analysis
+        st.subheader("Trading Volume Analysis")
+        fig_vol = go.Figure()
+        for company, data in stock_data.items():
+            fig_vol.add_trace(go.Scatter(
+                x=data.index,
+                y=data['Volume'],
+                name=company,
+                mode='lines'
+            ))
+        fig_vol.update_layout(
+            title="Trading Volume Comparison",
+            xaxis_title="Date",
+            yaxis_title="Volume",
+            height=400
+        )
+        st.plotly_chart(fig_vol, use_container_width=True)
+        
+else:
+    st.info("Please select at least 2 companies to compare.")
 
 # Separator
 st.write("---")
 
-# Stock Search Section
-st.write("Enter a company name to view detailed stock data and predictions.")
-company_name = st.text_input("Enter company name (e.g., Apple)", "Apple")
+# Single Stock Analysis Section
+st.header("Single Stock Analysis")
 
-if company_name:
-    # Find matching companies using fuzzy matching
-    matches = process.extract(company_name, list(COMPANY_SYMBOLS.keys()), limit=5)
-    matching_companies = [match[0] for match in matches if match[1] >= 60]
+# Company search with fuzzy matching
+company_search = st.text_input("Search for a company (name or symbol)")
+selected_company = None
+
+if company_search:
+    # Fuzzy match company name or symbol
+    matches = process.extract(company_search, list(COMPANY_SYMBOLS.keys()) + list(COMPANY_SYMBOLS.values()), limit=5)
+    best_matches = [match[0] for match in matches if match[1] > 60]
     
-    if not matching_companies:
-        st.warning("No matching companies found. Please try a different company name.")
-    else:
-        # Create dropdown for company selection
-        selected_company = st.selectbox("Select a company", matching_companies)
+    if best_matches:
+        selected_company = st.selectbox("Select company:", best_matches)
+        if selected_company in COMPANY_SYMBOLS:  # If company name selected
+            symbol = COMPANY_SYMBOLS[selected_company]
+        else:  # If symbol selected
+            symbol = selected_company
+            selected_company = [k for k, v in COMPANY_SYMBOLS.items() if v == symbol][0]
         
-        if selected_company:
-            stock_symbol = COMPANY_SYMBOLS[selected_company]
+        # Fetch stock data
+        with st.spinner(f'Fetching data for {selected_company} ({symbol})...'):
+            history, info = fetch_stock_data(symbol, "2y")
             
-            try:
-                with st.spinner('Fetching stock data...'):
-                    stock = yf.Ticker(stock_symbol)
-                    history = stock.history(period="1y")
+            if history is not None and info is not None:
+                # Company Information
+                st.subheader("Company Information")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("Current Price", f"${info.get('currentPrice', 'N/A')}")
+                with col2:
+                    st.metric("Market Cap", f"${info.get('marketCap', 0) / 1e9:.2f}B")
+                with col3:
+                    st.metric("P/E Ratio", f"{info.get('trailingPE', 'N/A')}")
+                
+                # Price History Chart
+                st.subheader("Price History")
+                timeframe = st.selectbox("Select timeframe:", ["1mo", "3mo", "6mo", "1y", "2y"], index=3)
+                history_subset = history[history.index > (pd.Timestamp.now() - pd.Timedelta(timeframe))]
+                
+                fig = go.Figure()
+                fig.add_trace(go.Candlestick(
+                    x=history_subset.index,
+                    open=history_subset['Open'],
+                    high=history_subset['High'],
+                    low=history_subset['Low'],
+                    close=history_subset['Close'],
+                    name="Price"
+                ))
+                
+                # Add moving averages
+                fig.add_trace(go.Scatter(x=history_subset.index, y=history_subset['Close'].rolling(window=20).mean(),
+                                       name="20-day MA", line=dict(color='orange')))
+                fig.add_trace(go.Scatter(x=history_subset.index, y=history_subset['Close'].rolling(window=50).mean(),
+                                       name="50-day MA", line=dict(color='blue')))
+                
+                fig.update_layout(title="Stock Price History", xaxis_title="Date", yaxis_title="Price (USD)",
+                                height=600, showlegend=True)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Technical Analysis and Predictions
+                st.subheader("Technical Analysis & Predictions")
+                
+                # Get predictions
+                predictions = predict_stock_trend(history, symbol)
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("Random Forest Prediction")
+                    rf_pred, rf_conf, rf_exp = predictions['Random Forest']
+                    st.metric("Prediction", rf_pred.title(), f"Confidence: {rf_conf:.1f}%")
                     
-                    if history.empty:
-                        st.error(f"No data available for {stock_symbol}")
-                    else:
-                        info = stock.info
-                        
-                        # Display company information
-                        st.header(f"{info['longName']} ({stock_symbol})")
-                        st.subheader("Company Information")
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write(f"Sector: {info.get('sector', 'N/A')}")
-                            st.write(f"Industry: {info.get('industry', 'N/A')}")
-                            st.write(f"Country: {info.get('country', 'N/A')}")
-                        with col2:
-                            st.write(f"Market Cap: ${info.get('marketCap', 'N/A'):,}")
-                            st.write(f"52 Week High: ${info.get('fiftyTwoWeekHigh', 'N/A'):.2f}")
-                            st.write(f"52 Week Low: ${info.get('fiftyTwoWeekLow', 'N/A'):.2f}")
-                        
-                        # Financial data table
-                        st.subheader("Key Financial Data")
-                        financial_data = pd.DataFrame({
-                            "Metric": ["Current Price", "P/E Ratio", "Forward P/E", "PEG Ratio", "Dividend Yield", "Book Value"],
-                            "Value": [
-                                f"${info.get('currentPrice', 'N/A'):.2f}",
-                                f"{info.get('trailingPE', 'N/A'):.2f}",
-                                f"{info.get('forwardPE', 'N/A'):.2f}",
-                                f"{info.get('pegRatio', 'N/A'):.2f}",
-                                f"{info.get('dividendYield', 'N/A')*100:.2f}%" if info.get('dividendYield') else 'N/A',
-                                f"${info.get('bookValue', 'N/A'):.2f}"
-                            ]
-                        })
-                        st.table(financial_data)
-                        
-                        # Stock price history chart
-                        st.subheader("Stock Price History")
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(x=history.index, y=history['Close'], name="Close Price"))
-                        fig.update_layout(
-                            title=f"{stock_symbol} Stock Price - Past Year",
-                            xaxis_title="Date",
-                            yaxis_title="Price (USD)"
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Download CSV button
-                        csv = history.to_csv().encode('utf-8')
-                        st.download_button(
-                            label="Download CSV",
-                            data=csv,
-                            file_name=f"{stock_symbol}_stock_data.csv",
-                            mime="text/csv"
-                        )
-                        
-                        # Stock prediction section
-                        st.header("Stock Price Predictions")
-                        with st.spinner('Generating predictions...'):
-                            predictions = predict_stock_trend(history, stock_symbol)
-                            
-                            # Display Random Forest predictions
-                            rf_pred, rf_conf, rf_explanation = predictions['Random Forest']
-                            st.subheader("Random Forest Model Prediction")
-                            st.write(f"**Prediction:** The stock is expected to {rf_pred} over the next 7 days")
-                            st.write(f"**Confidence:** {rf_conf:.2f}%")
-                            
-                            # Display enhanced analysis
-                            st.write("**Technical Analysis:**")
-                            st.write(rf_explanation['technical_analysis'])
-                            
-                            if rf_explanation['news_analysis']:
-                                st.write("**Recent News Impact:**")
-                                for news in rf_explanation['news_analysis']:
-                                    st.markdown(f"- **{news['source']}:** [{news['headline']}]({news['url']}) - {news['impact']}")
-                            
-                            st.write("**Overall Analysis:**")
-                            st.write(rf_explanation['combined_analysis'])
-                            st.write("---")
-                            
-                            # Display ARIMA predictions
-                            arima_predictions = predictions['ARIMA']
-                            if arima_predictions:
-                                st.subheader("ARIMA Model Predictions")
-                                
-                                # Create tabs for different forecast periods
-                                forecast_tabs = st.tabs(["7 Days", "15 Days", "30 Days", "90 Days", "120 Days"])
-                                forecast_periods = [7, 15, 30, 90, 120]
-                                
-                                for tab, period in zip(forecast_tabs, forecast_periods):
-                                    with tab:
-                                        forecast_data = arima_predictions[period]
-                                        st.write(f"**{period}-Day Forecast**")
-                                        st.write(f"**Prediction:** The stock is expected to {forecast_data['prediction']} over the next {period} days")
-                                        st.write(f"**Confidence:** {forecast_data['confidence']:.2f}%")
-                                        
-                                        if forecast_data.get('news_analysis'):
-                                            st.write("**News Impact on Forecast:**")
-                                            for news in forecast_data['news_analysis']:
-                                                st.markdown(f"- **{news['source']}:** [{news['headline']}]({news['url']}) - {news['impact']}")
-                                        
-                                        # Plot forecast with confidence intervals
-                                        fig = go.Figure()
-                                        fig.add_trace(go.Scatter(
-                                            x=history.index[-30:],
-                                            y=history['Close'][-30:],
-                                            name="Historical Price"
-                                        ))
-                                        fig.add_trace(go.Scatter(
-                                            x=forecast_data['daily_forecasts'].index,
-                                            y=forecast_data['daily_forecasts'],
-                                            name="Forecast",
-                                            line=dict(dash='dash')
-                                        ))
-                                        fig.add_trace(go.Scatter(
-                                            x=forecast_data['upper_bound'].index,
-                                            y=forecast_data['upper_bound'],
-                                            fill=None,
-                                            mode='lines',
-                                            line_color='rgba(0,100,80,0.2)',
-                                            name='Upper Bound'
-                                        ))
-                                        fig.add_trace(go.Scatter(
-                                            x=forecast_data['lower_bound'].index,
-                                            y=forecast_data['lower_bound'],
-                                            fill='tonexty',
-                                            mode='lines',
-                                            line_color='rgba(0,100,80,0.2)',
-                                            name='Lower Bound'
-                                        ))
-                                        fig.update_layout(
-                                            title=f"{period}-Day Price Forecast",
-                                            xaxis_title="Date",
-                                            yaxis_title="Price (USD)",
-                                            showlegend=True
-                                        )
-                                        st.plotly_chart(fig, use_container_width=True)
-                            else:
-                                st.error("ARIMA prediction failed. This might be due to insufficient or invalid data.")
-
-                        # Investment Calculator Section
-                        st.header(f"Investment Calculator - {selected_company} ({stock_symbol})")
-                        st.write(f"Calculate potential returns for your investment in {selected_company} based on our prediction models.")
-                        st.write(f"Current Stock Price: ${info['currentPrice']:.2f}")
-                        investment_amount = st.number_input("Enter investment amount ($)", min_value=100, step=100, value=1000)
-                        
-                        if arima_predictions:
-                            # Create investment analysis table
-                            investment_data = []
-                            
-                            for period in [7, 15, 30, 90, 120]:
-                                forecast = arima_predictions[period]
-                                current_price = forecast['last_price']
-                                
-                                # Calculate number of shares
-                                shares = investment_amount / current_price
-                                
-                                # Calculate predicted values
-                                predicted_price = forecast['daily_forecasts'][-1]
-                                upper_price = forecast['upper_bound'][-1]
-                                lower_price = forecast['lower_bound'][-1]
-                                
-                                # Calculate returns
-                                predicted_value = shares * predicted_price
-                                potential_gain = predicted_value - investment_amount
-                                potential_return = (potential_gain / investment_amount) * 100
-                                
-                                # Calculate best/worst case
-                                best_case = shares * upper_price - investment_amount
-                                worst_case = shares * lower_price - investment_amount
-                                
-                                # Determine risk level based on confidence intervals
-                                price_range = upper_price - lower_price
-                                price_volatility = price_range / predicted_price
-                                risk_level = "High" if price_volatility > 0.15 else "Medium" if price_volatility > 0.07 else "Low"
-                                
-                                investment_data.append({
-                                    "Timeframe": f"{period} Days",
-                                    "Predicted Value": f"${predicted_value:,.2f}",
-                                    "Potential Gain/Loss": f"${potential_gain:,.2f}",
-                                    "Return": f"{potential_return:.1f}%",
-                                    "Risk Level": risk_level,
-                                    "Best Case": best_case,
-                                    "Worst Case": worst_case,
-                                    "Timeline": forecast['daily_forecasts'].index,
-                                    "Values": forecast['daily_forecasts'] * (investment_amount / current_price),
-                                    "Upper": forecast['upper_bound'] * (investment_amount / current_price),
-                                    "Lower": forecast['lower_bound'] * (investment_amount / current_price)
-                                })
-                            
-                            # Display investment analysis table
-                            st.subheader("Investment Analysis")
-                            investment_df = pd.DataFrame(investment_data)
-                            st.table(investment_df[["Timeframe", "Predicted Value", "Potential Gain/Loss", "Return", "Risk Level"]])
-                            
-                            # Create investment growth chart
-                            st.subheader("Potential Investment Growth")
-                            selected_period = st.selectbox("Select timeframe", [7, 15, 30, 90, 120], format_func=lambda x: f"{x} Days")
-                            
-                            selected_data = next(data for data in investment_data if data["Timeframe"] == f"{selected_period} Days")
-                            
+                    if rf_exp.get('news_analysis'):
+                        st.write("Recent News Impact:")
+                        for news in rf_exp['news_analysis']:
+                            with st.expander(f"{news['headline'][:100]}..."):
+                                st.write(f"Source: {news['source']}")
+                                st.write(f"Published: {news['published']}")
+                                st.write(f"Impact: {news['impact']}")
+                                st.write(f"[Read more]({news['url']})")
+                
+                with col2:
+                    st.write("Technical Indicators")
+                    st.write(rf_exp['technical_analysis'])
+                
+                # ARIMA Predictions
+                st.subheader("ARIMA Price Predictions")
+                if predictions['ARIMA']:
+                    tabs = st.tabs(['7 Days', '15 Days', '30 Days', '90 Days'])
+                    periods = [7, 15, 30, 90]
+                    
+                    for tab, period in zip(tabs, periods):
+                        with tab:
+                            arima_pred = predictions['ARIMA'][period]
                             fig = go.Figure()
                             
-                            # Add initial investment line
-                            fig.add_hline(y=investment_amount, line_dash="dash", line_color="gray", name="Initial Investment")
-                            
-                            # Add predicted growth
+                            # Historical data
                             fig.add_trace(go.Scatter(
-                                x=selected_data["Timeline"],
-                                y=selected_data["Values"],
-                                name="Expected Growth",
-                                line=dict(color="blue")
+                                x=history_subset.index[-30:],
+                                y=history_subset['Close'][-30:],
+                                name="Historical",
+                                line=dict(color='blue')
                             ))
                             
-                            # Add confidence intervals
+                            # Predictions
                             fig.add_trace(go.Scatter(
-                                x=selected_data["Timeline"],
-                                y=selected_data["Upper"],
+                                x=arima_pred['daily_forecasts'].index,
+                                y=arima_pred['daily_forecasts'],
+                                name="Prediction",
+                                line=dict(color='red', dash='dash')
+                            ))
+                            
+                            # Confidence intervals
+                            fig.add_trace(go.Scatter(
+                                x=arima_pred['upper_bound'].index,
+                                y=arima_pred['upper_bound'],
                                 fill=None,
-                                mode="lines",
-                                line_color="rgba(0,100,80,0.2)",
-                                name="Optimistic Scenario"
+                                mode='lines',
+                                line_color='rgba(0,0,0,0)',
+                                showlegend=False
                             ))
                             
                             fig.add_trace(go.Scatter(
-                                x=selected_data["Timeline"],
-                                y=selected_data["Lower"],
-                                fill="tonexty",
-                                mode="lines",
-                                line_color="rgba(0,100,80,0.2)",
-                                name="Pessimistic Scenario"
+                                x=arima_pred['lower_bound'].index,
+                                y=arima_pred['lower_bound'],
+                                fill='tonexty',
+                                mode='lines',
+                                line_color='rgba(0,0,0,0)',
+                                name='Confidence Interval'
                             ))
                             
                             fig.update_layout(
-                                title=f"Potential {selected_period}-Day Investment Growth",
+                                title=f"{period}-Day Price Prediction",
                                 xaxis_title="Date",
-                                yaxis_title="Investment Value ($)",
-                                showlegend=True,
-                                height=500
+                                yaxis_title="Price (USD)",
+                                height=400
                             )
-                            
                             st.plotly_chart(fig, use_container_width=True)
-                            
-                            st.write("""
-                            **Note:**
-                            - The expected growth line shows the most likely path based on historical data and current trends.
-                            - The shaded area represents the range of potential outcomes, with the upper and lower bounds showing optimistic and pessimistic scenarios.
-                            - Risk levels are calculated based on the volatility of predictions:
-                                - Low: Less than 7% price variation
-                                - Medium: 7-15% price variation
-                                - High: More than 15% price variation
-                            """)
-
-            except Exception as e:
-                st.error(f"Error fetching data for {stock_symbol}. Please try again.")
-                st.exception(e)
-
-# Add footer
-st.markdown("---")
-st.write("Data provided by Yahoo Finance. This app is for educational purposes only and should not be used for financial advice.")
+                            st.metric("Prediction", arima_pred['prediction'].title(),
+                                    f"Confidence: {arima_pred['confidence']:.1f}%")
+                
+                # Investment Calculator
+                st.subheader("Investment Calculator")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    investment_amount = st.number_input("Initial Investment ($)", min_value=100, value=10000)
+                    investment_period = st.selectbox("Investment Period", [
+                        "7 Days", "15 Days", "30 Days", "90 Days"
+                    ])
+                
+                with col2:
+                    risk_tolerance = st.select_slider(
+                        "Risk Tolerance",
+                        options=["Low", "Medium", "High"],
+                        value="Medium"
+                    )
+                
+                period_days = int(investment_period.split()[0])
+                if predictions['ARIMA'] and period_days in predictions['ARIMA']:
+                    arima_pred = predictions['ARIMA'][period_days]
+                    final_price = arima_pred['daily_forecasts'][-1]
+                    price_change = (final_price - arima_pred['last_price']) / arima_pred['last_price']
+                    
+                    # Calculate potential returns
+                    expected_return = investment_amount * (1 + price_change)
+                    worst_case = investment_amount * (1 + (price_change - (0.2 if risk_tolerance == "High" else 0.1)))
+                    best_case = investment_amount * (1 + (price_change + (0.2 if risk_tolerance == "High" else 0.1)))
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Expected Return", f"${expected_return:,.2f}",
+                                f"{(expected_return/investment_amount - 1)*100:.1f}%")
+                    with col2:
+                        st.metric("Best Case", f"${best_case:,.2f}",
+                                f"{(best_case/investment_amount - 1)*100:.1f}%")
+                    with col3:
+                        st.metric("Worst Case", f"${worst_case:,.2f}",
+                                f"{(worst_case/investment_amount - 1)*100:.1f}%")
+                    
+                    # Risk Analysis
+                    st.write("Risk Analysis")
+                    risk_factors = []
+                    
+                    # Volatility risk
+                    volatility = history['Close'].pct_change().std() * np.sqrt(252)  # Annualized volatility
+                    risk_factors.append(f"Historical Volatility: {volatility*100:.1f}%")
+                    
+                    # Price trend risk
+                    recent_trend = "upward" if history['Close'].iloc[-1] > history['Close'].iloc[-20] else "downward"
+                    risk_factors.append(f"Recent Price Trend: {recent_trend}")
+                    
+                    # Technical indicator risks
+                    if rf_exp['technical_analysis']:
+                        risk_factors.append(f"Technical Indicators: {rf_exp['technical_analysis']}")
+                    
+                    # News sentiment risk
+                    if rf_exp.get('news_analysis'):
+                        avg_sentiment = np.mean([float(news['sentiment']) for news in rf_exp['news_analysis']])
+                        risk_factors.append(f"News Sentiment: {'Positive' if avg_sentiment > 0 else 'Negative' if avg_sentiment < 0 else 'Neutral'}")
+                    
+                    for factor in risk_factors:
+                        st.write(f"• {factor}")
+            else:
+                st.error("Error fetching data for the selected company.")
+    else:
+        st.warning("No matching companies found. Please try a different search term.")
