@@ -287,15 +287,17 @@ if company_search:
                 # Price History Chart
                 st.subheader("Price History")
                 timeframe = st.selectbox("Select timeframe:", ["30d", "90d", "180d", "1y", "2y"], index=3)
-                # Calculate the date range based on timeframe
+                # Calculate the date range based on timeframe and handle timezones
                 if 'd' in timeframe:
                     days = int(timeframe.replace('d', ''))
-                    cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=days)
+                    cutoff_date = pd.Timestamp.now().tz_localize(None) - pd.DateOffset(days=days)
                 else:
                     years = int(timeframe.replace('y', ''))
-                    cutoff_date = pd.Timestamp.now() - pd.DateOffset(years=years)
+                    cutoff_date = pd.Timestamp.now().tz_localize(None) - pd.DateOffset(years=years)
                 
-                history_subset = history[history.index > cutoff_date]
+                history_subset = history.copy()
+                history_subset.index = history_subset.index.tz_localize(None)
+                history_subset = history_subset[history_subset.index > cutoff_date]
                 
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(
