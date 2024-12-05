@@ -113,65 +113,70 @@ st.title("Stock Market Insights")
 st.write("Advanced stock analysis and prediction platform with investment calculator")
 @st.cache_data(ttl=3600)
 def get_top_performers(period="1mo"):
-    """Fetch top performing stocks with caching"""
+    """Fetch top performing stocks dynamically from Yahoo Finance market movers"""
     try:
-        # List of major stocks (S&P 500 top components)
-        major_stocks = [
-            'AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META', 'BRK-B', 'LLY', 'AVGO', 'JPM',
-            'V', 'XOM', 'MA', 'UNH', 'JNJ', 'PG', 'HD', 'ABBV', 'MRK', 'CVX',
-            'KO', 'PEP', 'BAC', 'COST', 'AMD', 'MCD', 'CSCO', 'CRM', 'ADBE', 'WMT'
-        ]
+        # Create a YFinance screener instance
+        screener = yf.Screener()
+        
+        # Get day gainers (most active stocks with positive gains)
+        gainers = screener.get_day_gainers()
+        # Get most active stocks
+        active = screener.get_day_most_active()
+        
+        # Combine and deduplicate stocks
+        all_stocks = pd.concat([gainers, active]).drop_duplicates(subset='Symbol')
         
         performance_data = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_to_stock = {
-                executor.submit(yf.Ticker, symbol): symbol 
-                for symbol in major_stocks
+                executor.submit(yf.Ticker, row['Symbol']): row 
+                for _, row in all_stocks.iterrows()
             }
             
             for future in concurrent.futures.as_completed(future_to_stock):
-                symbol = future_to_stock[future]
+                stock_info = future_to_stock[future]
                 try:
                     stock = future.result()
-                    info = stock.info
                     history = stock.history(period=period)
                     
                     if not history.empty:
                         start_price = history['Close'].iloc[0]
                         current_price = history['Close'].iloc[-1]
                         change_pct = ((current_price - start_price) / start_price) * 100
+                        volume = history['Volume'].mean()
                         
                         performance_data.append({
-                            'Symbol': symbol,
-                            'Company': info.get('shortName', symbol),
+                            'Symbol': stock_info['Symbol'],
+                            'Company': stock_info['Name'],
                             'Price': f"${current_price:.2f}",
-                            'Change %': change_pct,
-                            'Change_Numeric': change_pct  # For sorting
+                            'Change %': f"{'🔼' if change_pct > 0 else '🔽'} {abs(change_pct):.2f}%",
+                            'Volume': f"{volume:,.0f}",
+                            'Change_Numeric': float(change_pct)
                         })
                 except Exception as e:
-                    print(f"Error fetching data for {symbol}: {str(e)}")
+                    print(f"Error fetching data for {stock_info['Symbol']}: {str(e)}")
+                    continue
         
+        if not performance_data:
+            return pd.DataFrame(columns=['Symbol', 'Company', 'Price', 'Change %', 'Volume'])
+            
         # Convert to DataFrame and sort by performance
         df = pd.DataFrame(performance_data)
         df = df.sort_values('Change_Numeric', ascending=False).head(15)
-        
-        # Format the Change % column with colors
-        df['Change %'] = df['Change %'].apply(
-            lambda x: f"{'🔼' if x > 0 else '🔽'} {abs(x):.2f}%"
-        )
         
         # Drop the numeric column used for sorting
         df = df.drop('Change_Numeric', axis=1)
         
         return df
+        
     except Exception as e:
         st.error(f"Error fetching top performers: {str(e)}")
-        return pd.DataFrame(columns=['Symbol', 'Company', 'Price', 'Change %'])
+        return pd.DataFrame(columns=['Symbol', 'Company', 'Price', 'Change %', 'Volume'])
 
 # Top Performers Section
 st.subheader("Top 15 Performing Stocks")
-tabs = st.tabs(["1 Week", "1 Month", "3 Months", "6 Months", "12 Months"])
-periods = ["7d", "1mo", "3mo", "6mo", "1y"]
+tabs = st.tabs(["5 Days", "1 Month", "3 Months", "6 Months", "12 Months"])
+periods = ["5d", "1mo", "3mo", "6mo", "1y"]
 
 for tab, period in zip(tabs, periods):
     with tab:
