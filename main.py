@@ -113,53 +113,57 @@ st.title("Stock Market Insights")
 st.write("Advanced stock analysis and prediction platform with investment calculator")
 @st.cache_data(ttl=3600)
 def get_top_performers(period="1mo"):
-    """Fetch top performing stocks dynamically from Yahoo Finance market movers"""
+    """Fetch top performing stocks dynamically from Yahoo Finance"""
     try:
-        # Create a YFinance screener instance
-        screener = yf.Screener()
-        
-        # Get day gainers (most active stocks with positive gains)
-        gainers = screener.get_day_gainers()
-        # Get most active stocks
-        active = screener.get_day_most_active()
-        
-        # Combine and deduplicate stocks
-        all_stocks = pd.concat([gainers, active]).drop_duplicates(subset='Symbol')
-        
+        # List of major market indices to get top movers
+        indices = ['^GSPC', '^DJI', '^IXIC']  # S&P 500, Dow Jones, NASDAQ
         performance_data = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_stock = {
-                executor.submit(yf.Ticker, row['Symbol']): row 
-                for _, row in all_stocks.iterrows()
-            }
-            
-            for future in concurrent.futures.as_completed(future_to_stock):
-                stock_info = future_to_stock[future]
-                try:
-                    stock = future.result()
-                    history = stock.history(period=period)
-                    
-                    if not history.empty:
-                        start_price = history['Close'].iloc[0]
-                        current_price = history['Close'].iloc[-1]
-                        change_pct = ((current_price - start_price) / start_price) * 100
-                        volume = history['Volume'].mean()
-                        
-                        performance_data.append({
-                            'Symbol': stock_info['Symbol'],
-                            'Company': stock_info['Name'],
-                            'Price': f"${current_price:.2f}",
-                            'Change %': f"{'🔼' if change_pct > 0 else '🔽'} {abs(change_pct):.2f}%",
-                            'Volume': f"{volume:,.0f}",
-                            'Change_Numeric': float(change_pct)
-                        })
-                except Exception as e:
-                    print(f"Error fetching data for {stock_info['Symbol']}: {str(e)}")
+        
+        for index in indices:
+            try:
+                # Get index data
+                index_ticker = yf.Ticker(index)
+                # Get top components
+                components = index_ticker.info.get('components', [])
+                if not components:
                     continue
+                
+                # Process each component
+                for symbol in components[:20]:  # Take top 20 from each index
+                    try:
+                        ticker = yf.Ticker(symbol)
+                        history = ticker.history(period=period)
+                        info = ticker.info
+                        
+                        if not history.empty:
+                            start_price = history['Close'].iloc[0]
+                            current_price = history['Close'].iloc[-1]
+                            change_pct = ((current_price - start_price) / start_price) * 100
+                            volume = history['Volume'].mean()
+                            
+                            performance_data.append({
+                                'Symbol': symbol,
+                                'Company': info.get('shortName', symbol),
+                                'Price': f"${current_price:.2f}",
+                                'Change %': f"{'🔼' if change_pct > 0 else '🔽'} {abs(change_pct):.2f}%",
+                                'Volume': f"{volume:,.0f}",
+                                'Change_Numeric': float(change_pct)
+                            })
+                            
+                            # Add small delay to avoid rate limiting
+                            time.sleep(0.1)
+                            
+                    except Exception as e:
+                        print(f"Error processing {symbol}: {str(e)}")
+                        continue
+                        
+            except Exception as e:
+                print(f"Error processing index {index}: {str(e)}")
+                continue
         
         if not performance_data:
             return pd.DataFrame(columns=['Symbol', 'Company', 'Price', 'Change %', 'Volume'])
-            
+        
         # Convert to DataFrame and sort by performance
         df = pd.DataFrame(performance_data)
         df = df.sort_values('Change_Numeric', ascending=False).head(15)
