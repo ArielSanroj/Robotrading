@@ -111,27 +111,31 @@ st.set_page_config(
 # Add title and description
 st.title("Stock Market Insights")
 st.write("Advanced stock analysis and prediction platform with investment calculator")
-@st.cache_data(ttl=3600)
+# List of major stocks to track
+MAJOR_STOCKS = [
+    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'JNJ',
+    'JPM', 'V', 'PG', 'MA', 'HD', 'CVX', 'ABBV', 'BAC', 'KO', 'PFE', 'WMT', 'DIS',
+    'COST', 'MRK', 'AVGO', 'CSCO', 'VZ', 'CRM', 'ABT', 'CMCSA'
+]
+
+@st.cache_data(ttl=180)  # Cache for 3 minutes
 def get_top_performers(period="1mo"):
-    """Fetch top performing stocks dynamically from Yahoo Finance"""
+    """Fetch top performing stocks from predefined major stocks list"""
     try:
-        # List of major market indices to get top movers
-        indices = ['^GSPC', '^DJI', '^IXIC']  # S&P 500, Dow Jones, NASDAQ
         performance_data = []
+        rate_limit_retries = 3
         
-        for index in indices:
-            try:
-                # Get index data
-                index_ticker = yf.Ticker(index)
-                # Get top components
-                components = index_ticker.info.get('components', [])
-                if not components:
-                    continue
-                
-                # Process each component
-                for symbol in components[:20]:  # Take top 20 from each index
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_symbol = {
+                executor.submit(lambda s: (s, yf.Ticker(s)), symbol): symbol 
+                for symbol in MAJOR_STOCKS
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_symbol):
+                symbol = future_to_symbol[future]
+                for retry in range(rate_limit_retries):
                     try:
-                        ticker = yf.Ticker(symbol)
+                        symbol, ticker = future.result()
                         history = ticker.history(period=period)
                         info = ticker.info
                         
@@ -149,22 +153,20 @@ def get_top_performers(period="1mo"):
                                 'Volume': f"{volume:,.0f}",
                                 'Change_Numeric': float(change_pct)
                             })
+                            break  # Success, exit retry loop
                             
-                            # Add small delay to avoid rate limiting
-                            time.sleep(0.1)
-                            
-                    except Exception as e:
-                        print(f"Error processing {symbol}: {str(e)}")
-                        continue
+                        time.sleep(0.2)  # Rate limit handling
                         
-            except Exception as e:
-                print(f"Error processing index {index}: {str(e)}")
-                continue
+                    except Exception as e:
+                        if retry < rate_limit_retries - 1:
+                            time.sleep(1)  # Wait longer between retries
+                            continue
+                        print(f"Error processing {symbol} after {rate_limit_retries} retries: {str(e)}")
         
         if not performance_data:
             return pd.DataFrame(columns=['Symbol', 'Company', 'Price', 'Change %', 'Volume'])
         
-        # Convert to DataFrame and sort by performance
+        # Convert to DataFrame and ensure exactly 15 top performers
         df = pd.DataFrame(performance_data)
         df = df.sort_values('Change_Numeric', ascending=False).head(15)
         
