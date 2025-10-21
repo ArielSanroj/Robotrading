@@ -1,0 +1,63 @@
+# Trading Bot Configuration
+# This file contains all configuration settings with validation
+
+email:
+  smtp_server: "smtp.gmail.com"
+  smtp_port: 465
+  use_ssl: true
+  username: ""  # Set via environment variable GMAIL_ADDRESS
+  password: ""  # Set via environment variable GMAIL_APP_PASSWORD
+  recipients: []  # Set via environment variable RECIPIENT_EMAIL
+  enabled: true
+
+brokers:
+  - name: "IBKR"
+    host: "127.0.0.1"
+    port: 7497
+    client_id: 1
+    paper_trading: true
+    enabled: true
+
+api:
+  alpha_vantage_key: ""  # Set via environment variable ALPHA_VANTAGE_KEY
+  slickcharts_timeout: 10
+  yfinance_timeout: 10
+  cache_duration: 300  # 5 minutes
+
+trading:
+  shares_per_trade: 1
+  max_positions_per_asset: 5
+  profit_taking_threshold: 2.0
+  stop_loss_threshold: -5.0
+  equity_allocation: 0.6
+  bond_allocation: 0.3
+  crypto_allocation: 0.1
+  
+  # Advanced Stop-Loss Configuration
+  stop_loss:
+    enabled: true
+    trailing_percent: 5.0          # Trailing stop percentage
+    atr_multiplier: 2.0            # ATR multiplier for volatility-adjusted stops
+    atr_period: 14                 # ATR calculation period
+    regime_aware: true             # Enable HMM regime-aware stops
+    high_vol_threshold: 0.5        # HMM high volatility probability threshold
+    high_vol_tightening: 0.6       # Tighten stops by this factor in high-vol regime
+    intraday_check_interval: 15    # Minutes between intraday checks
+    min_hold_time: 30              # Minimum minutes to hold before stop-loss applies
+
+logging:
+  level: "INFO"
+  format: "json"
+  file_path: "logs/trading_bot.log"
+  max_file_size: 10485760  # 10MB
+  backup_count: 5
+  rotation: "size"
+
+health_check:
+  enabled: true
+  port: 8080
+  check_interval: 60  # seconds
+  timeout: 30  # seconds
+
+environment: "production"
+debug: false
