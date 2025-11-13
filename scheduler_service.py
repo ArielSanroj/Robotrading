@@ -40,24 +40,25 @@ class TradingScheduler:
         
     def setup_schedule(self):
         """Set up trading schedule"""
-        # Morning session: 9:00 AM EST (14:00 UTC)
-        schedule.every().monday.at("14:00").do(self.run_morning_session)
-        schedule.every().tuesday.at("14:00").do(self.run_morning_session)
-        schedule.every().wednesday.at("14:00").do(self.run_morning_session)
-        schedule.every().thursday.at("14:00").do(self.run_morning_session)
-        schedule.every().friday.at("14:00").do(self.run_morning_session)
+        # Use LOCAL TIME for scheduling to avoid UTC/DST confusion
+        # Morning session: 10:30 AM (1 hour after 9:30 AM market open)
+        schedule.every().monday.at("10:30").do(self.run_morning_session)
+        schedule.every().tuesday.at("10:30").do(self.run_morning_session)
+        schedule.every().wednesday.at("10:30").do(self.run_morning_session)
+        schedule.every().thursday.at("10:30").do(self.run_morning_session)
+        schedule.every().friday.at("10:30").do(self.run_morning_session)
         
-        # Afternoon session: 3:30 PM EST (20:30 UTC)
-        schedule.every().monday.at("20:30").do(self.run_afternoon_session)
-        schedule.every().tuesday.at("20:30").do(self.run_afternoon_session)
-        schedule.every().wednesday.at("20:30").do(self.run_afternoon_session)
-        schedule.every().thursday.at("20:30").do(self.run_afternoon_session)
-        schedule.every().friday.at("20:30").do(self.run_afternoon_session)
+        # Afternoon session: 3:30 PM (30 minutes before 4:00 PM market close)
+        schedule.every().monday.at("15:30").do(self.run_afternoon_session)
+        schedule.every().tuesday.at("15:30").do(self.run_afternoon_session)
+        schedule.every().wednesday.at("15:30").do(self.run_afternoon_session)
+        schedule.every().thursday.at("15:30").do(self.run_afternoon_session)
+        schedule.every().friday.at("15:30").do(self.run_afternoon_session)
         
         logger.info("Trading schedule configured:")
-        logger.info("  Morning sessions: 9:00 AM EST (14:00 UTC)")
-        logger.info("  Afternoon sessions: 3:30 PM EST (20:30 UTC)")
-        logger.info("  Weekdays only")
+        logger.info("  Morning sessions: 10:30 AM (1 hour after market open)")
+        logger.info("  Afternoon sessions: 3:30 PM (30 min before market close)")
+        logger.info("  Weekdays only (Monday-Friday)")
     
     def run_morning_session(self):
         """Run morning trading session"""
@@ -69,6 +70,8 @@ class TradingScheduler:
     
     def _run_session(self, session_type: str):
         """Run a trading session"""
+        logger.info(f"🔄 SCHEDULER TRIGGERED: {session_type} session at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
         if shutdown_flag.is_set():
             logger.info("Shutdown flag set, skipping session")
             return
@@ -78,7 +81,9 @@ class TradingScheduler:
         
         try:
             # Check if market is open (basic check)
-            if not self._is_market_open():
+            market_open = self._is_market_open()
+            logger.info(f"Market hours check: {'PASSED' if market_open else 'FAILED'} (current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
+            if not market_open:
                 logger.info("Market appears to be closed, skipping session")
                 return
             
@@ -209,8 +214,21 @@ class TradingScheduler:
         
         # Main loop
         try:
+            loop_count = 0
+            last_log_time = datetime.now()
+            
             while self.running and not shutdown_flag.is_set():
                 schedule.run_pending()
+                
+                # Log scheduler heartbeat every 5 minutes for debugging
+                loop_count += 1
+                if loop_count % 300 == 0:  # Every 5 minutes (300 seconds)
+                    next_run = schedule.next_run()
+                    logger.info(
+                        f"Scheduler heartbeat - Next run: {next_run.isoformat() if next_run else 'None'}, "
+                        f"Last run: {self.last_run.isoformat() if self.last_run else 'Never'}, "
+                        f"Run count: {self.run_count}, Error count: {self.error_count}"
+                    )
                 
                 # Run intraday stop-loss checks
                 try:

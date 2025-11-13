@@ -13,9 +13,9 @@ email:
 brokers:
   - name: "IBKR"
     host: "127.0.0.1"
-    port: 7497
-    client_id: 1
-    paper_trading: true
+    port: 7496
+    client_id: 99
+    paper_trading: false
     enabled: true
 
 api:
@@ -55,7 +55,7 @@ logging:
 
 health_check:
   enabled: true
-  port: 8080
+  port: 8082
   check_interval: 60  # seconds
   timeout: 30  # seconds
 

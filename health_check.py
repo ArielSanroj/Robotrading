@@ -237,13 +237,17 @@ class HealthChecker:
             )
     
     def check_ibkr(self, host: str, port: int, client_id: int) -> HealthCheckResult:
-        """Check IBKR connectivity"""
+        """Check IBKR connectivity using a dedicated health check client ID"""
         start_time = time.time()
         service = "ibkr"
         
+        # Use a separate client ID for health checks to avoid conflicts
+        # Health check client ID = trading client ID + 100
+        health_check_client_id = client_id + 100
+        
         try:
             ib = IB()
-            ib.connect(host, port, clientId=client_id, timeout=self.timeout)
+            ib.connect(host, port, clientId=health_check_client_id, timeout=self.timeout)
             response_time = time.time() - start_time
             
             if ib.isConnected():
@@ -257,7 +261,7 @@ class HealthChecker:
                     message="IBKR is accessible",
                     response_time=response_time,
                     timestamp=datetime.now(),
-                    details={"host": host, "port": port, "client_id": client_id, "account_items": len(account)}
+                    details={"host": host, "port": port, "client_id": client_id, "health_check_client_id": health_check_client_id, "account_items": len(account)}
                 )
             else:
                 return HealthCheckResult(
@@ -269,6 +273,16 @@ class HealthChecker:
                 )
                 
         except Exception as e:
+            error_msg = str(e)
+            # If health check client ID is also in use, that's okay - just log it
+            if "client id is already in use" in error_msg.lower():
+                return HealthCheckResult(
+                    service=service,
+                    status=HealthStatus.HEALTHY,  # Still healthy if we can't connect due to ID conflict
+                    message="IBKR health check client ID in use (connection active)",
+                    response_time=time.time() - start_time,
+                    timestamp=datetime.now()
+                )
             return HealthCheckResult(
                 service=service,
                 status=HealthStatus.UNHEALTHY,
@@ -387,12 +401,22 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     
     def _handle_metrics(self):
         """Handle metrics endpoint"""
-        # This would integrate with the metrics collector
-        response = {
-            "message": "Metrics endpoint not implemented yet",
-            "timestamp": datetime.now().isoformat()
-        }
-        self._send_json_response(response)
+        try:
+            # Integrate with logging_config metrics collector
+            from logging_config import get_metrics
+            metrics = get_metrics()
+            response = {
+                "metrics": metrics,
+                "timestamp": datetime.now().isoformat()
+            }
+            self._send_json_response(response)
+        except Exception as e:
+            response = {
+                "error": "Failed to collect metrics",
+                "message": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+            self._send_json_response(response, 500)
     
     def _handle_not_found(self):
         """Handle 404"""

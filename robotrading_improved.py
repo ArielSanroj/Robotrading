@@ -38,6 +38,9 @@ from bond_trader import BondTrader
 from retry_utils import retry_api_call, retry_ibkr_call, retry_smtp_call
 from config_manager import get_config, get_broker_config, get_email_config, get_trading_config
 from logging_config import setup_logging, get_trading_logger, get_metrics
+from services.email_templates import render_trade_alert, render_session_summary
+from services.persistence import init_db, save_session, save_trade
+from services.async_queue import EmailQueue
 from data_cache import cached_data_provider
 from health_check import HealthChecker, run_health_check
 
@@ -72,6 +75,30 @@ trading_session = {
     'total_trades': 0,
     'session_start_time': None
 }
+
+# Initialize persistence and async email queue
+init_db()
+email_queue: EmailQueue = EmailQueue(
+    smtp_server=email_config.smtp_server,
+    smtp_port=email_config.smtp_port,
+    username=email_config.username,
+    password=email_config.password,
+)
+email_queue.start()
+
+
+def reset_trading_session(session_type: str = '', start_time: Optional[datetime] = None):
+    """Reset tracked trading session data for a new run."""
+    global trading_session
+    trading_session = {
+        'session_type': session_type,
+        'stocks_purchased': [],
+        'stocks_sold': [],
+        'money_spent': 0.0,
+        'money_earned': 0.0,
+        'total_trades': 0,
+        'session_start_time': start_time
+    }
 
 # Global IBKR client
 ib = None
@@ -114,7 +141,7 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 def initialize_ibkr() -> bool:
-    """Initialize IBKR connection with retry logic"""
+    """Initialize IBKR connection with retry logic and client ID conflict handling"""
     global ib
     
     broker_config = get_broker_config("IBKR")
@@ -124,9 +151,16 @@ def initialize_ibkr() -> bool:
     
     try:
         with ib_lock:
-            if ib and ib.isConnected():
-                return True
+            # Disconnect any existing connection first
+            if ib:
+                try:
+                    if ib.isConnected():
+                        ib.disconnect()
+                except:
+                    pass
+                ib = None
             
+            # Create new connection with dedicated client ID
             ib = IB()
             ib.connect(
                 broker_config.host, 
@@ -137,7 +171,7 @@ def initialize_ibkr() -> bool:
             
             if ib.isConnected():
                 trading_logger.logger.info(
-                    f"Connected to IBKR",
+                    f"Connected to IBKR with client ID {broker_config.client_id}",
                     extra={
                         "event_type": "ibkr_connected",
                         "host": broker_config.host,
@@ -152,7 +186,11 @@ def initialize_ibkr() -> bool:
                 return False
                 
     except Exception as e:
-        logger.error(f"Failed to initialize IBKR: {e}")
+        error_msg = str(e)
+        if "client id is already in use" in error_msg.lower() or "clientId" in error_msg:
+            logger.error(f"IBKR client ID {broker_config.client_id} is already in use. Please ensure only one process is using this client ID.")
+        else:
+            logger.error(f"Failed to initialize IBKR: {e}")
         return False
 
 def ensure_ibkr_connection() -> bool:
@@ -162,6 +200,14 @@ def ensure_ibkr_connection() -> bool:
     with ib_lock:
         if ib and ib.isConnected():
             return True
+        
+        # Disconnect any stale connection
+        if ib:
+            try:
+                ib.disconnect()
+            except:
+                pass
+            ib = None
         
         logger.warning("IBKR connection lost, attempting to reconnect...")
         return initialize_ibkr()
@@ -297,8 +343,9 @@ def validate_hmm_inputs(prices: pd.Series) -> Tuple[bool, str]:
     Validate inputs for HMM model
     Returns (is_valid, message)
     """
-    if len(prices) < 252:
-        return False, f"Insufficient data (need 252 days, have {len(prices)})"
+    # Allow 250+ days (approximately 1 year of trading days, accounting for holidays)
+    if len(prices) < 250:
+        return False, f"Insufficient data (need 250 days, have {len(prices)})"
     
     # Check for stationarity
     try:
@@ -386,7 +433,6 @@ def send_email_alert_robust(symbol: str, action: str, top_df=None, trade_value=0
         return True
     
     try:
-        msg = EmailMessage()
         ytd = top_df[top_df['Symbol'] == symbol]['YTD'].iloc[0] if top_df is not None and symbol in top_df['Symbol'].values else 'N/A'
         
         # Track trade in session
@@ -407,18 +453,9 @@ def send_email_alert_robust(symbol: str, action: str, top_df=None, trade_value=0
         
         trading_session['total_trades'] += 1
         
-        msg.set_content(
-            f"ALERT: {action} {symbol} - {'Strong upward trend!' if action == 'BUY' else 'Potential reversal!'}\nYTD Return: {ytd}%\nTrade Value: ${trade_value:.2f}")
-        msg['Subject'] = f"Trading Alert: {action} {symbol}"
-        msg['From'] = email_config.username
-        
-        # Send to all recipients
-        for recipient in email_config.recipients:
-            msg['To'] = recipient
-            
-            with smtplib.SMTP_SSL(email_config.smtp_server, email_config.smtp_port) as smtp:
-                smtp.login(email_config.username, email_config.password)
-                smtp.send_message(msg)
+        template = render_trade_alert(symbol, action, ytd, trade_value)
+        if email_config.enabled and email_config.recipients:
+            email_queue.enqueue(template["subject"], template["content"], email_config.recipients)
         
         trading_logger.logger.info(
             f"Email sent for {action} {symbol}",
@@ -445,78 +482,16 @@ def send_trading_summary_robust() -> bool:
         return True
     
     try:
-        msg = EmailMessage()
-        
-        # Calculate net profit/loss with division-by-zero protection
+        # Build summary via template
         net_profit = trading_session['money_earned'] - trading_session['money_spent']
-        
-        if trading_session['money_spent'] > 0:
-            profit_pct = (net_profit / trading_session['money_spent'] * 100)
-        else:
-            profit_pct = 0.0
-            logger.info("No money spent in this session, profit percentage set to 0")
-        
-        # Build email content
-        content = f"""
-🤖 ROBOTRADING SESSION SUMMARY
-{'='*50}
 
-📅 Session: {trading_session['session_type']} TRADING
-⏰ Time: {trading_session['session_start_time'].strftime('%Y-%m-%d %H:%M:%S') if trading_session['session_start_time'] else 'N/A'}
-
-📊 TRADING ACTIVITY
-{'-'*30}
-Total Trades: {trading_session['total_trades']}
-Stocks Purchased: {len(trading_session['stocks_purchased'])}
-Stocks Sold: {len(trading_session['stocks_sold'])}
-
-💰 FINANCIAL SUMMARY
-{'-'*30}
-Money Spent: ${trading_session['money_spent']:.2f}
-Money Earned: ${trading_session['money_earned']:.2f}
-Net Profit/Loss: ${net_profit:.2f} ({profit_pct:+.1f}%)
-
-📈 STOCKS PURCHASED
-{'-'*30}
-"""
-        
-        if trading_session['stocks_purchased']:
-            for stock in trading_session['stocks_purchased']:
-                content += f"• {stock['symbol']}: ${stock['value']:.2f} (YTD: {stock['ytd']}%)\n"
-        else:
-            content += "• No stocks purchased\n"
-        
-        content += f"""
-📉 STOCKS SOLD
-{'-'*30}
-"""
-        
-        if trading_session['stocks_sold']:
-            for stock in trading_session['stocks_sold']:
-                content += f"• {stock['symbol']}: ${stock['value']:.2f} (YTD: {stock['ytd']}%)\n"
-        else:
-            content += "• No stocks sold\n"
-        
-        content += f"""
-🎯 NEXT SESSION
-{'-'*30}
-Next trading session will be at {'3:30 PM GMT-5' if trading_session['session_type'] == 'MORNING' else '9:00 AM GMT-5 tomorrow'}
-
----
-🤖 Robotrading Bot - Automated Trading System
-"""
-        
-        msg.set_content(content)
-        msg['Subject'] = f"🤖 Trading Summary - {trading_session['session_type']} Session"
-        msg['From'] = email_config.username
-        
-        # Send to all recipients
-        for recipient in email_config.recipients:
-            msg['To'] = recipient
-            
-            with smtplib.SMTP_SSL(email_config.smtp_server, email_config.smtp_port) as smtp:
-                smtp.login(email_config.username, email_config.password)
-                smtp.send_message(msg)
+        template = render_session_summary(
+            trading_session.get('session_type', ''),
+            trading_session.get('session_start_time'),
+            trading_session,
+        )
+        if email_config.enabled and email_config.recipients:
+            email_queue.enqueue(template["subject"], template["content"], email_config.recipients)
         
         trading_logger.logger.info(
             f"Trading summary email sent",
@@ -607,7 +582,7 @@ def check_basic_stop_loss_positions() -> List[Tuple[str, float]]:
                                 "stop_loss_threshold": stop_loss_threshold
                             }
                         )
-                        logger.warning(f"🛑 BASIC STOP LOSS TRIGGERED: {symbol} {loss_pct:.1f}% loss (${current_price:.2f} vs ${avg_cost:.2f}) - SELLING")
+                        logger.warning(f"?? BASIC STOP LOSS TRIGGERED: {symbol} {loss_pct:.1f}% loss (${current_price:.2f} vs ${avg_cost:.2f}) - SELLING")
         
         return stop_loss_triggered
     except Exception as e:
@@ -615,7 +590,12 @@ def check_basic_stop_loss_positions() -> List[Tuple[str, float]]:
         return []
 
 @retry_ibkr_call(max_retries=3, base_delay=2.0)
-def execute_trade_robust(symbol: str, action: str, asset_class=AssetClass.EQUITY) -> Optional[Dict[str, Any]]:
+def execute_trade_robust(
+    symbol: str,
+    action: str,
+    asset_class=AssetClass.EQUITY,
+    portfolio_manager: Optional["PortfolioManager"] = None,
+) -> Optional[Dict[str, Any]]:
     """
     Execute trade with robust error handling and fill confirmation
     """
@@ -624,6 +604,9 @@ def execute_trade_robust(symbol: str, action: str, asset_class=AssetClass.EQUITY
         return None
 
     try:
+        if portfolio_manager is None:
+            portfolio_manager = PortfolioManager()
+
         # Get current price with caching
         ticker = yf.Ticker(symbol)
         latest_price = ticker.info.get('regularMarketPrice', ticker.history(period='1d')['Close'].iloc[-1])
@@ -651,8 +634,10 @@ def execute_trade_robust(symbol: str, action: str, asset_class=AssetClass.EQUITY
         portfolio_manager.update_positions(positions_data)
         
         # Fixed position size with allocation limits
-        trade_size = min(trading_config.shares_per_trade, 
-                        portfolio_manager.get_available_allocation(asset_class) // latest_price)
+        trade_size = min(
+            trading_config.shares_per_trade,
+            portfolio_manager.get_available_allocation(asset_class) // latest_price
+        )
         
         if trade_size <= 0:
             logger.warning(f"No available allocation for {symbol} in {asset_class}")
@@ -704,6 +689,12 @@ def execute_trade_robust(symbol: str, action: str, asset_class=AssetClass.EQUITY
                 order_id=str(trade.order.orderId)
             )
             
+            # Persist trade record (session_id 0 placeholder; session save can reconcile later)
+            try:
+                save_trade(session_id=0, symbol=symbol, action=action, quantity=fill_quantity, price=fill_price, value=trade_value)
+            except Exception as e:
+                logger.warning(f"Failed to persist trade record: {e}")
+
             return {
                 'symbol': symbol,
                 'action': action,
@@ -720,12 +711,17 @@ def execute_trade_robust(symbol: str, action: str, asset_class=AssetClass.EQUITY
         logger.error(f"Error executing trade for {symbol}: {e}")
         return None
 
-def run_equity_trading() -> TradingResult:
+def run_equity_trading(portfolio_manager=None) -> TradingResult:
     """
     Run equity trading workflow in isolation
     """
     try:
         trading_logger.logger.info("Starting equity trading workflow")
+        
+        # Initialize portfolio manager if not provided
+        if portfolio_manager is None:
+            from portfolio_manager import PortfolioManager
+            portfolio_manager = PortfolioManager()
         
         # Get top stocks with caching
         top_df = get_top_stocks_cached(15)
@@ -755,21 +751,21 @@ def run_equity_trading() -> TradingResult:
             # Fallback to basic stop-loss checking
             stop_loss_positions = check_stop_loss_positions_robust()
             for symbol, loss_pct in stop_loss_positions:
-                logger.warning(f"🛑 BASIC STOP LOSS: {symbol} {loss_pct:.1f}% loss - Selling to limit losses (no email alert)")
+                logger.warning(f"?? BASIC STOP LOSS: {symbol} {loss_pct:.1f}% loss - Selling to limit losses (no email alert)")
                 sell_signals.append((symbol, -1))
         except Exception as e:
             logger.error(f"Error in stop-loss processing: {e}")
             # Fallback to basic stop-loss checking
             stop_loss_positions = check_stop_loss_positions_robust()
             for symbol, loss_pct in stop_loss_positions:
-                logger.warning(f"🛑 FALLBACK STOP LOSS: {symbol} {loss_pct:.1f}% loss - Selling to limit losses (no email alert)")
+                logger.warning(f"?? FALLBACK STOP LOSS: {symbol} {loss_pct:.1f}% loss - Selling to limit losses (no email alert)")
                 sell_signals.append((symbol, -1))
         
         # Execute trades
         trades_executed = 0
         for symbol, signal in buy_signals + sell_signals:
             action = "BUY" if signal == 1 else "SELL"
-            order = execute_trade_robust(symbol, action, AssetClass.EQUITY)
+            order = execute_trade_robust(symbol, action, AssetClass.EQUITY, portfolio_manager)
             
             if order:
                 trades_executed += 1
@@ -790,13 +786,16 @@ def run_equity_trading() -> TradingResult:
             error=e
         )
 
-def run_bond_trading() -> TradingResult:
+def run_bond_trading(portfolio_manager: Optional["PortfolioManager"] = None) -> TradingResult:
     """
     Run bond trading workflow in isolation
     """
     try:
         trading_logger.logger.info("Starting bond trading workflow")
         
+        if portfolio_manager is None:
+            portfolio_manager = PortfolioManager()
+
         bond_trader = BondTrader()
         bond_symbols = list(bond_trader.bond_etfs.keys())
         bond_signals = bond_trader.generate_bond_signals(bond_symbols)
@@ -809,7 +808,7 @@ def run_bond_trading() -> TradingResult:
         trades_executed = 0
         for symbol, signal in bond_buy_signals + bond_sell_signals:
             action = "BUY" if signal == 1 else "SELL"
-            order = execute_trade_robust(symbol, action, AssetClass.FIXED_INCOME)
+            order = execute_trade_robust(symbol, action, AssetClass.FIXED_INCOME, portfolio_manager)
             
             if order:
                 trades_executed += 1
@@ -829,15 +828,18 @@ def run_bond_trading() -> TradingResult:
             error=e
         )
 
-def run_crypto_trading() -> TradingResult:
+def run_crypto_trading(portfolio_manager: Optional["PortfolioManager"] = None) -> TradingResult:
     """
     Run crypto trading workflow in isolation
     """
     try:
         trading_logger.logger.info("Starting crypto trading workflow")
         
+        if portfolio_manager is None:
+            portfolio_manager = PortfolioManager()
+
         crypto_trader = CryptoTrader()
-        crypto_symbols = list(crypto_trader.crypto_symbols.keys())
+        crypto_symbols = list(crypto_trader.supported_cryptos.keys())
         crypto_signals = crypto_trader.generate_crypto_signals(crypto_symbols)
         
         # Process crypto signals
@@ -848,7 +850,7 @@ def run_crypto_trading() -> TradingResult:
         trades_executed = 0
         for symbol, signal in crypto_buy_signals + crypto_sell_signals:
             action = "BUY" if signal == 1 else "SELL"
-            order = execute_trade_robust(symbol, action, AssetClass.CRYPTO)
+            order = execute_trade_robust(symbol, action, AssetClass.CRYPTO, portfolio_manager)
             
             if order:
                 trades_executed += 1
@@ -873,8 +875,8 @@ def run_bot_robust():
     Main bot function with isolated workflows and graceful error handling
     """
     session_start = datetime.now()
-    trading_session['session_start_time'] = session_start
-    trading_session['session_type'] = 'MORNING' if session_start.hour < 12 else 'AFTERNOON'
+    session_type = 'MORNING' if session_start.hour < 12 else 'AFTERNOON'
+    reset_trading_session(session_type=session_type, start_time=session_start)
     
     trading_logger.log_session_start(trading_session['session_type'])
     
@@ -891,19 +893,19 @@ def run_bot_robust():
     logger.info("=" * 50)
     logger.info("EQUITY TRADING (60% allocation)")
     logger.info("=" * 50)
-    results['equity'] = run_equity_trading()
+    results['equity'] = run_equity_trading(portfolio_manager)
     
     # 2. FIXED INCOME TRADING (30% of portfolio)
     logger.info("=" * 50)
     logger.info("FIXED INCOME TRADING (30% allocation)")
     logger.info("=" * 50)
-    results['bonds'] = run_bond_trading()
+    results['bonds'] = run_bond_trading(portfolio_manager)
     
     # 3. CRYPTO TRADING (10% of portfolio)
     logger.info("=" * 50)
     logger.info("CRYPTO TRADING (10% allocation)")
     logger.info("=" * 50)
-    results['crypto'] = run_crypto_trading()
+    results['crypto'] = run_crypto_trading(portfolio_manager)
     
     # 4. PORTFOLIO SUMMARY
     logger.info("=" * 50)
@@ -923,6 +925,12 @@ def run_bot_robust():
     
     # Send summary email
     send_trading_summary_robust()
+    
+    # Persist session summary
+    try:
+        save_session(trading_session)
+    except Exception as e:
+        logger.warning(f"Failed to persist session summary: {e}")
     
     # Log results summary
     logger.info("Trading session completed:")
